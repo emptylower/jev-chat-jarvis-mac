@@ -10,6 +10,10 @@ on:
       name:
         type: string
         description: Run name
+  # PR 的 CI 通过后自动跟进；workflows 按名字匹配 ci.yml 的 name: CI（改名需同步）
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 permissions:
   contents: read
@@ -17,6 +21,11 @@ permissions:
 jobs:
   pullfrog:
     runs-on: ubuntu-latest
+    # 手动 dispatch 直接跑；workflow_run 只在「CI 由 PR 触发且成功」时跟进
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'pull_request')
     permissions:
       id-token: write
       contents: read
@@ -25,6 +34,8 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          # workflow_run 触发时默认检出的是 master，必须显式指向触发 run 的 PR 提交
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - name: Run agent
         uses: pullfrog/pullfrog@v0
         with:
