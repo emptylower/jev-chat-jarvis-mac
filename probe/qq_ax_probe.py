@@ -37,7 +37,9 @@ def classes(el):
     return tuple(str(c) for c in (v or ()))
 
 
-def walk(el, depth=0, limit=[0]):
+def walk(el, depth=0, limit=None):
+    if limit is None:                 # 不能用可变默认值：上一轮的计数会带进下一轮
+        limit = [0]
     limit[0] += 1
     if limit[0] > 6000 or depth > 60:
         return
@@ -46,10 +48,21 @@ def walk(el, depth=0, limit=[0]):
         yield from walk(c, depth + 1, limit)
 
 
+def fill_arg(argv):
+    """(--fill 的文本, 用法是否正确)；--fill 不带参数时第二个值为 False。"""
+    if "--fill" not in argv:
+        return None, True
+    i = argv.index("--fill")
+    if i + 1 >= len(argv):
+        return None, False
+    return argv[i + 1], True
+
+
 def main():
-    fill_text = None
-    if "--fill" in sys.argv:
-        fill_text = sys.argv[sys.argv.index("--fill") + 1]
+    fill_text, usage_ok = fill_arg(sys.argv)
+    if not usage_ok:
+        print("用法: qq_ax_probe.py [--fill 文本]  （--fill 需要跟一个文本参数）")
+        return 2
     print("AX trusted:", AS.AXIsProcessTrusted())
     apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.tencent.qq")
     if not apps:

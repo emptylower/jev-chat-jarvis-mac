@@ -74,9 +74,9 @@ class ChatApp(Protocol):
 - **识别**：bundle `com.tencent.qq` 或名字 `QQ`。首次接触某个 pid 时设一次 `AXManualAccessibility`；pid 变化重设。
 - **找窗口**：遍历 QQ 进程 `kAXWindowsAttribute`，只保留子树含 class `ExEditor-qq-msg-editor` 的 `AXTextArea` 的窗口。优先 `kAXFocusedWindowAttribute`，否则面积最大者。用 pid + 位置 + 尺寸在 `CGWindowListCopyWindowInfo` 中反查 wid，供 HUD 停靠与 layout 键使用。反查失败时 wid 取 0，不阻断读消息。
 - **会话标题**：编辑器 `AXDescription`；为空时回退窗口 `AXTitle`。
-- **消息抽取**：在窗口子树中收集 class 含 `msg-content-container` 的节点。
+- **消息抽取**：在窗口子树中收集 class 含 `msg-content-container` 的节点（遍历剪枝：子树整体滚出屏幕——高度 ≤ 1 的虚拟占位或在窗口矩形外——不下探；命中一个 `msg-content-container` 后不再下探其子树，嵌套容器是引用回复，不重复产出）。
   - side：class 含 `container--self` → `me`；否则 → `them`。（此处不产生 `unknown`。）
-  - text：其下 `message-content` 内全部 `AXStaticText` 的 `AXValue` 按 x 顺序拼接，去首尾空白；为空（纯图/表情）则跳过。
+  - text：其下 `message-content` 内全部 `AXStaticText` 的 `AXValue` 按 DOM（DFS）顺序拼接，去首尾空白（折行段落 x 不单调，按 x 排序会打乱）；为空（纯图/表情）则跳过。
   - sender：同一消息行内 class `avatar-span` 节点的 `AXDescription`；无则 `None`。
   - 过滤：高度 ≤ 1、超出窗口矩形、或与编辑器矩形相交的节点丢弃。
   - 坐标按窗口归一化写入 `Message.x/y/w/h`（顶部原点，与 `extract_messages` 输出口径一致），YOLO 检测框照常可画。
@@ -93,7 +93,8 @@ class ChatApp(Protocol):
 APPS: tuple[ChatApp, ...] = (WeChatApp(), QQApp())
 
 def frontmost_app() -> ChatApp | None:
-    """查一次 NSWorkspace.frontmostApplication，先按 bundle id 再按名字匹配；查询失败返回 None。"""
+    """查一次 NSWorkspace.frontmostApplication，先按 bundle id 再按名字匹配；
+    查询失败返回 UNKNOWN 哨兵（不是离开的证据）；返回 None 表示前台是别的 App。"""
 
 def app_by_key(key: str) -> ChatApp | None: ...
 ```
@@ -117,7 +118,7 @@ def app_by_key(key: str) -> ChatApp | None: ...
 | 已设 `AXManualAccessibility` 但树为空 | `error="QQ 无障碍树为空，请重启 QQ 后重试"`；每 tick 重设标志，不自动重启进程 |
 | 多个 QQ 聊天窗口 | 取焦点窗口；焦点变化改变 layout 键，自动重读 |
 | 填入失败 | 沿用 `fill.py` 原因文案，「微信」替换为 App 名；不自动重试 |
-| `NSWorkspace` 瞬时失败 | `frontmost_app()` 返回 None 时按现有「冻结一个短 tick」处理，不制造离开/返回事件 |
+| `NSWorkspace` 瞬时失败 | `frontmost_app()` 返回 `UNKNOWN` 哨兵时按现有「冻结一个短 tick」处理，不制造离开/返回事件；返回 None 表示前台是别的 App（真正的离开） |
 
 ## 5. 测试
 

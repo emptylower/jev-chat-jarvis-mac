@@ -7,7 +7,7 @@ Run: uv run python -B -m unittest discover -s tests
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
@@ -27,6 +27,7 @@ class FakeAX:
     def role(self, el): return el.role
     def desc(self, el): return el.desc
     def value(self, el): return el.value
+    def value_or_none(self, el): return el.value   # 测试里可把节点 value 设为 None 模拟读失败
     def title(self, el): return el.title
     def classes(self, el): return el.classes
     def rect(self, el): return el.rect
@@ -134,15 +135,85 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(msgs[0].text, '第3条')
         self.assertEqual(msgs[-1].text, '第14条')
 
-    def test_multiple_static_texts_join_in_x_order(self):
+    def test_multiple_static_texts_join_in_dom_order(self):
         ax = FakeAX()
         row = message('', 'them', 300.0)
         content = row[1].children[0].children[0]
-        content.children = [N('AXStaticText', value=' 复活吧', rect=(560.0, 301.0, 40.0, 16.0)),
-                            N('AXStaticText', value='@缓缓', rect=(401.0, 301.0, 60.0, 16.0))]
+        content.children = [N('AXStaticText', value='@缓缓', rect=(401.0, 301.0, 60.0, 16.0)),
+                            N('AXStaticText', value=' 复活吧', rect=(560.0, 301.0, 40.0, 16.0))]
         win = chat_window([row])
         msgs = qq.extract_messages(ax, win, qq.find_editor(ax, win))
         self.assertEqual(msgs[0].text, '@缓缓 复活吧')
+
+    def test_wrapped_line_keeps_dom_order_across_smaller_x(self):
+        # 折行的第三段 x 更小：按 x 排序会把「明天见」搬到最前，打乱换行消息
+        ax = FakeAX()
+        row = message('', 'them', 300.0)
+        content = row[1].children[0].children[0]
+        content.children = [N('AXStaticText', value='@缓缓', rect=(401.0, 301.0, 60.0, 16.0)),
+                            N('AXStaticText', value=' 复活吧', rect=(560.0, 301.0, 40.0, 16.0)),
+                            N('AXStaticText', value='明天见', rect=(380.0, 321.0, 48.0, 16.0))]
+        win = chat_window([row])
+        msgs = qq.extract_messages(ax, win, qq.find_editor(ax, win))
+        self.assertEqual(msgs[0].text, '@缓缓 复活吧明天见')
+
+    def test_walk_prune_finds_editor_under_many_offscreen_rows(self):
+        # 700 行滚出屏幕的 h=1 虚拟占位排在编辑器之前：不剪枝会在 3000 节点上限内到不了编辑器
+        rows = [message(f'旧{i}', 'them', 237.0, h=1.0) for i in range(700)]
+        rows += [message('可见一', 'them', 420.0), message('可见二', 'them', 460.0),
+                 message('可见三', 'them', 500.0)]
+        win = chat_window(rows)
+        ax = FakeAX()
+        ed = qq.find_editor(ax, win)
+        self.assertIsNotNone(ed)
+        self.assertEqual([m.text for m in qq.extract_messages(ax, win, ed)],
+                         ['可见一', '可见二', '可见三'])
+
+    def test_quote_reply_block_is_excluded_from_body(self):
+        # 引用回复块（reply-element）在容器内、message-content 外：其文字不算正文
+        row = [
+            N(desc='王小姐', classes=('avatar-span',), rect=(340.0, 300.0, 32.0, 32.0)),
+            N(classes=('msg-content-container',), rect=(400.0, 300.0, 160.0, 60.0), children=[
+                N(classes=('reply-element',), rect=(405.0, 302.0, 150.0, 24.0), children=[
+                    N('AXStaticText', value='被引用的话', rect=(410.0, 305.0, 80.0, 16.0)),
+                ]),
+                N(classes=('message-content',), rect=(405.0, 330.0, 150.0, 22.0), children=[
+                    N('AXStaticText', value='回复正文', rect=(410.0, 332.0, 80.0, 16.0)),
+                ]),
+            ]),
+        ]
+        win = chat_window([row])
+        msgs = qq.extract_messages(FakeAX(), win, qq.find_editor(FakeAX(), win))
+        self.assertEqual([m.text for m in msgs], ['回复正文'])
+
+    def test_nested_container_is_not_double_counted(self):
+        # 引用块里嵌套的 msg-content-container 不能再产出一条消息
+        row = [
+            N(desc='王小姐', classes=('avatar-span',), rect=(340.0, 300.0, 32.0, 32.0)),
+            N(classes=('msg-content-container',), rect=(400.0, 300.0, 160.0, 60.0), children=[
+                N(classes=('reply-element',), rect=(405.0, 302.0, 150.0, 24.0), children=[
+                    N(classes=('msg-content-container',), rect=(410.0, 304.0, 140.0, 20.0), children=[
+                        N(classes=('message-content',), rect=(412.0, 306.0, 136.0, 16.0), children=[
+                            N('AXStaticText', value='被引用的话', rect=(415.0, 307.0, 80.0, 16.0)),
+                        ]),
+                    ]),
+                ]),
+                N(classes=('message-content',), rect=(405.0, 330.0, 150.0, 22.0), children=[
+                    N('AXStaticText', value='回复正文', rect=(410.0, 332.0, 80.0, 16.0)),
+                ]),
+            ]),
+        ]
+        win = chat_window([row])
+        msgs = qq.extract_messages(FakeAX(), win, qq.find_editor(FakeAX(), win))
+        self.assertEqual([m.text for m in msgs], ['回复正文'])
+
+    def test_messages_sorted_by_y_not_dom_order(self):
+        # DFS 先遇到 y 大的行：结果仍须按 y 升序（顶部在前）
+        ax = FakeAX()
+        win = chat_window([message('低处', 'them', 500.0), message('高处', 'them', 300.0)])
+        msgs = qq.extract_messages(ax, win, qq.find_editor(ax, win))
+        self.assertEqual([m.text for m in msgs], ['高处', '低处'])
+        self.assertLess(msgs[0].y, msgs[1].y)
 
     def test_fingerprint_tracks_title_and_messages(self):
         ax = FakeAX()
@@ -164,8 +235,8 @@ class WindowTests(unittest.TestCase):
         self.assertIsNotNone(ed)
 
     def test_focused_chat_window_wins_over_larger_one(self):
-        small = chat_window([]); small.rect = (0.0, 0.0, 800.0, 600.0)
-        big = chat_window([])
+        small = chat_window([])
+        big = chat_window([]); big.rect = (0.0, 0.0, 1500.0, 950.0)   # 放大窗口保持子树在其内
         ax = FakeAX(windows=[big, small], focused=small)
         self.assertIs(qq.chat_window(ax, 'app')[0], small)
 
@@ -222,6 +293,16 @@ class ReadConversationTests(unittest.TestCase):
         resized = qq.read_conversation(ax=ax, prev_fingerprint=first['fingerprint'], prev_layout=(42, 900.0, 782.0))
         self.assertFalse(resized['unchanged'])
 
+    def test_chat_window_editor_is_reused_no_second_find(self):
+        # read_conversation 直接复用 chat_window 找到的编辑器，不对同一窗口二次 find_editor
+        win = chat_window([message('在吗', 'them', 300.0)])
+        ax = FakeAX(windows=[list_window(), win], focused=win)
+        with patch.object(qq, 'find_editor', wraps=qq.find_editor) as fe:
+            res = qq.read_conversation(ax=ax)
+        self.assertTrue(res['ok'])
+        self.assertEqual(fe.call_count, 2)          # 每个窗口各一次（列表 + 聊天），仅此而已
+        self.assertEqual(res['input_rect'], (311.0, 753.0, 1098.0, 169.0))
+
     def test_no_chat_window_error(self):
         ax = FakeAX(windows=[list_window()])
         res = qq.read_conversation(ax=ax)
@@ -246,8 +327,12 @@ class ReadConversationTests(unittest.TestCase):
 
 
 class _FakeRunningApp:
-    def __init__(self, pid): self._pid = pid
-    def processIdentifier(self): return self._pid
+    def __init__(self, pid):
+        self._pid = pid
+    def processIdentifier(self):
+        return self._pid
+    def activateWithOptions_(self, _):
+        pass
 
 
 class FillTests(unittest.TestCase):
@@ -274,6 +359,12 @@ class FillTests(unittest.TestCase):
             self.assertIsNone(t['box']); self.assertEqual(t['reason'], qq.fill.REASON_NO_ACCESS)
             cw.assert_not_called()
 
+    def test_locate_input_without_window_geometry(self):
+        # 窗口字典缺几何键：返回未取得控件，而不是 KeyError
+        t = qq.locate_input({'wid': 42}, ax=self.ax)
+        self.assertIsNone(t['box'])
+        self.assertEqual(t['reason'], qq.REASON_NO_INPUT)
+
     def test_locate_input_rejects_editor_outside_window(self):
         t = qq.locate_input(dict(self.window, x=0.0, y=0.0, w=100.0, h=100.0), ax=self.ax)
         self.assertIsNone(t['box']); self.assertIn('不在当前 QQ 窗口内', t['reason'])
@@ -291,6 +382,14 @@ class FillTests(unittest.TestCase):
              patch.object(qq, '_type_text', return_value=typed) as typer:
             result = qq.fill_text(text, target=target, ax=self.ax)
         return result, setter, typer
+
+    def test_readback_needs_change_not_substring(self):
+        # 草稿「好的呀」已包含回复「好」：子串命中不算已填入，必须落到键盘后备
+        self.editor.value = '好的呀'
+        (ok, reason), setter, typer = self._fill('好', landed='好的呀', typed=(False, qq.REASON_DRAFT))
+        self.assertFalse(ok)
+        self.assertEqual(reason, qq.REASON_DRAFT)
+        typer.assert_called_once()
 
     def test_ax_write_into_empty_editor_and_verify(self):
         (ok, reason), setter, typer = self._fill('你好', landed='你好')
@@ -322,14 +421,151 @@ class FillTests(unittest.TestCase):
         (ok, reason), setter, _ = self._fill('你好', landed='你好')
         self.assertFalse(ok); self.assertEqual(reason, qq.fill.REASON_DUPLICATE); setter.assert_not_called()
 
+    def test_unreadable_editor_stops_ax_fill(self):
+        # 读不到编辑器内容时不能当成空编辑器盲写
+        self.editor.value = None
+        target = qq.locate_input(self.window, ax=self.ax)
+        with patch.object(qq.fill, '_ax_set_value') as setter:
+            ok, reason = qq.fill_text('你好', target=target, ax=self.ax)
+        self.assertEqual((ok, reason), (False, qq.REASON_UNREADABLE))
+        setter.assert_not_called()
+
+    def test_unreadable_editor_stops_typing(self):
+        self.editor.value = None
+        ok, reason = qq._type_text('你好', self.editor, _FakeRunningApp(5), self.ax)
+        self.assertEqual((ok, reason), (False, qq.REASON_UNREADABLE))
+
     def test_empty_text_and_missing_target(self):
         self.assertEqual(qq.fill_text('  ', target=None, ax=self.ax), (False, qq.fill.REASON_EMPTY))
         self.assertEqual(qq.fill_text('x', target=None, ax=self.ax), (False, qq.REASON_NO_INPUT))
+
+    def test_typing_exception_is_caught_and_lock_released(self):
+        target = qq.locate_input(self.window, ax=self.ax)
+        with patch.object(qq.fill, '_ax_set_value', return_value=False), \
+             patch.object(qq, '_type_text', side_effect=RuntimeError('boom')):
+            ok, reason = qq.fill_text('你好', target=target, ax=self.ax)
+        self.assertEqual((ok, reason), (False, '输入过程异常，请先检查草稿，勿重复点击'))
+        self.assertFalse(qq._FILL_LOCK.locked())
 
     def test_typing_refuses_existing_draft(self):
         self.editor.value = '草稿'
         ok, reason = qq._type_text('你好', self.editor, _FakeRunningApp(5), self.ax)
         self.assertFalse(ok); self.assertEqual(reason, qq.REASON_DRAFT)
+
+
+class TypeTextTests(unittest.TestCase):
+    """键盘后备：桩掉 Quartz 键盘事件、前台应用与编辑器焦点，只验证 _type_text 的编排。
+
+    键入事件用 keycode 0 + Unicode 字符串；断言绝无回车（0x24 ANSI / 0x4C 小键盘）。"""
+
+    def setUp(self):
+        self.win = chat_window([])
+        self.editor = qq.find_editor(FakeAX(), self.win)
+        self.ax = FakeAX(windows=[self.win], focused=self.win)
+        self.typed = []      # 每段在 key up 时记一次，模拟编辑器实际收到的内容
+        self.chunks = []     # 每次 CGEventKeyboardSetUnicodeString 记一次（down/up 各一次）
+        self.keycodes = []
+
+    def _type(self, text, front=None, focused=True, drop_focus_after_chunk=0):
+        front = front if front is not None else _FakeRunningApp(5)
+        ws = MagicMock()
+        ws.sharedWorkspace.return_value.frontmostApplication.return_value = front
+
+        def fake_create(_, keycode, down):
+            self.keycodes.append(keycode)
+            return ('ev', keycode, down)
+
+        def fake_unicode(ev, n, s):
+            self.chunks.append(s)
+            if not ev[2]:                       # key up：这一段落进了编辑器
+                self.typed.append(s)
+                self.editor.value = ''.join(self.typed)
+                if drop_focus_after_chunk and len(self.typed) == drop_focus_after_chunk:
+                    front._pid = 999            # 下一段发出前焦点丢失
+
+        with patch.object(qq.AppKit, 'NSWorkspace', ws), \
+             patch.object(qq.fill, '_ax_attr', return_value=focused), \
+             patch.object(qq.AS, 'AXUIElementSetAttributeValue', lambda *a: 0), \
+             patch.object(qq.Quartz, 'CGEventCreateKeyboardEvent', fake_create), \
+             patch.object(qq.Quartz, 'CGEventSetFlags', lambda ev, flags: None), \
+             patch.object(qq.Quartz, 'CGEventKeyboardSetUnicodeString', fake_unicode), \
+             patch.object(qq.Quartz, 'CGEventPost', lambda tap, ev: None), \
+             patch.object(qq.time, 'sleep', lambda s: None):
+            return qq._type_text(text, self.editor, _FakeRunningApp(5), self.ax)
+
+    def test_success_types_chunks_and_verifies(self):
+        result = self._type('一二三四五' * 6)          # 30 字 → 20 + 10 两段
+        self.assertEqual(result, (True, '已填入（键盘输入，未发送）'))
+        self.assertEqual(''.join(self.typed), '一二三四五' * 6)
+
+    def test_keycode_is_always_zero_never_return(self):
+        self._type('你好')
+        self.assertTrue(self.keycodes)
+        self.assertEqual(set(self.keycodes), {0})      # 绝无 0x24 / 0x4C 回车
+        self.assertNotIn(0x24, self.keycodes)
+        self.assertNotIn(0x4C, self.keycodes)
+
+    def test_control_characters_never_reach_keyboard(self):
+        self._type('第一行\r第二行\t尾' + '\u2028' + 'end\n')
+        joined = ''.join(self.chunks)
+        for ch in ('\r', '\n', '\t', '\u2028'):
+            self.assertNotIn(ch, joined)
+
+    def test_refuses_when_frontmost_is_not_qq(self):
+        result = self._type('你好', front=_FakeRunningApp(999))
+        self.assertEqual(result, (False, 'QQ 没有获得焦点，请先点 QQ 输入区再重试'))
+        self.assertEqual(self.chunks, [])
+
+    def test_refuses_when_editor_not_focused(self):
+        result = self._type('你好', focused=False)
+        self.assertEqual(result, (False, '输入框未获得焦点，请先点 QQ 输入区再重试'))
+        self.assertEqual(self.chunks, [])
+
+    def test_stops_when_focus_lost_mid_typing(self):
+        # 25 字符分两段；第一段落完后前台 pid 变化 → 只发过第一段
+        result = self._type('a' * 25, drop_focus_after_chunk=1)
+        self.assertEqual(result, (False, '窗口或焦点变化，输入已中止；请检查草稿，勿重复点击'))
+        self.assertEqual(self.typed, ['a' * 20])
+
+    def test_emoji_chunks_stay_within_20_utf16_units(self):
+        text = '😀' * 23                                    # 46 个 UTF-16 单元
+        result = self._type(text)
+        self.assertTrue(result[0])
+        self.assertEqual(''.join(self.typed), text)
+        for chunk in self.typed:
+            self.assertLessEqual(len(chunk.encode('utf-16-le')) // 2, 20)
+
+
+class ProbeScriptTests(unittest.TestCase):
+    """probe/qq_ax_probe.py 的两处独立缺陷：walk 计数器可变默认值、--fill 缺参数。"""
+
+    @staticmethod
+    def _probe():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            'qq_ax_probe', ROOT / 'probe' / 'qq_ax_probe.py')
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_walk_counter_resets_between_calls(self):
+        probe = self._probe()
+        big = {'children': [{'children': ()} for _ in range(6100)]}
+        small = {'children': [{'children': ()}, {'children': ()}]}
+        with patch.object(probe, 'attr',
+                          side_effect=lambda el, name: el['children']):
+            first = sum(1 for _ in probe.walk(big))     # 顶满 6000 节点上限
+            second = sum(1 for _ in probe.walk(small))  # 可变默认 limit=[0] 会让这轮一无所获
+        self.assertEqual(first, 6000)
+        self.assertEqual(second, 3)
+
+    def test_fill_arg_requires_a_value(self):
+        probe = self._probe()
+        self.assertEqual(probe.fill_arg([]), (None, True))
+        self.assertEqual(probe.fill_arg(['--fill', '你好']), ('你好', True))
+        text, ok = probe.fill_arg(['probe.py', '--fill'])
+        self.assertFalse(ok)
+        self.assertIsNone(text)
 
 
 if __name__ == '__main__':

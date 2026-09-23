@@ -74,6 +74,13 @@ class RegistryTests(unittest.TestCase):
         with patch.object(registry, '_frontmost', return_value=None):
             self.assertIs(registry.frontmost_app(), registry.UNKNOWN)
 
+    def test_workspace_exception_is_unknown(self):
+        # NSWorkspace 本身抛异常也走 UNKNOWN：不是「前台是别的 App」的证据
+        from apps import registry
+        with patch('AppKit.NSWorkspace') as ws:      # PyObjC 选择器不能直接 patch，换整个名字
+            ws.sharedWorkspace.side_effect = RuntimeError
+            self.assertIs(registry.frontmost_app(), registry.UNKNOWN)
+
     def test_app_by_key(self):
         from apps import registry
         self.assertEqual(registry.app_by_key('qq').display_name, 'QQ')

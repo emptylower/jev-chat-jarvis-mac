@@ -26,6 +26,7 @@ if __name__ == "__main__" and not __package__:   # CLI 自测：python src/apps/
 
 import fill
 from perception import Message, WindowInfo
+from visual_fill import plain_text
 
 KEY = "qq"
 DISPLAY_NAME = "QQ"
@@ -45,6 +46,7 @@ ERR_EMPTY_TREE = "QQ 无障碍树为空，请重启 QQ 后重试"
 
 REASON_NO_INPUT = "未取得可用的 QQ 输入控件"
 REASON_DRAFT = "输入区已有草稿；请使用复制手动插入，避免改动现有内容"
+REASON_UNREADABLE = "无法读取输入区，已停止填入"
 
 
 class AXReader:
@@ -62,6 +64,11 @@ class AXReader:
 
     def value(self, el) -> str:
         return self._str(el, AS.kAXValueAttribute)
+
+    def value_or_none(self, el):
+        """AXValue 字符串，或 None（读失败）。调用方必须把 None 当「读不到」而非空串。"""
+        v = fill._ax_attr(el, AS.kAXValueAttribute)
+        return v if isinstance(v, str) else None
 
     def title(self, el) -> str:
         return self._str(el, AS.kAXTitleAttribute)
@@ -96,20 +103,38 @@ class AXReader:
 
 # ------------------------------------------------------------------ 纯解析
 
-def walk(ax, root, limit: int = MAX_NODES):
-    """有界深度优先遍历。DFS 顺序保证同一行里头像节点先于正文容器出现。"""
+def walk(ax, root, limit: int = MAX_NODES, prune=None):
+    """有界深度优先遍历。DFS 顺序保证同一行里头像节点先于正文容器出现。
+
+    prune(el) 为真时该节点本身仍产出，但不展开其子树：用于跳过滚出屏幕的
+    子树（高度 ≤ 1 的虚拟占位或在窗口矩形外），否则 DFS 里排在前面的离屏
+    旧消息会把 limit 花光，编辑器与最新消息反而轮不到。"""
     stack = [root]
     seen = 0
     while stack and seen < limit:
         el = stack.pop()
         seen += 1
         yield el
+        if prune is not None and prune(el):
+            continue
         stack.extend(reversed(ax.children(el)))
+
+
+def _window_prune(ax, win_rect):
+    """基于窗口矩形的剪枝函数；窗口矩形读不到时返回 None（无从判断，退回不剪）。"""
+    if win_rect is None:
+        return None
+
+    def prune(el) -> bool:
+        r = ax.rect(el)
+        return r is not None and (r[3] <= 1 or not _intersects(r, win_rect))
+
+    return prune
 
 
 def find_editor(ax, window):
     """聊天窗口的消息编辑器，或 None（会话列表窗口没有）。"""
-    for el in walk(ax, window):
+    for el in walk(ax, window, prune=_window_prune(ax, ax.rect(window))):
         if ax.role(el) == "AXTextArea" and EDITOR_CLASS in ax.classes(el):
             return el
     return None
@@ -135,16 +160,24 @@ def _inside(inner, outer, slack: float = 3.0) -> bool:
 
 
 def _texts(ax, container) -> str:
-    """容器里全部 AXStaticText 按 x 顺序拼接；纯图 / 表情包没有文字，返回空串。"""
+    """正文只取 class 含 message-content 的后代之下的 AXStaticText，按 DFS（即 DOM）顺序拼接。
+
+    折行段落 x 不单调，按 x 排序会打乱；引用回复块（reply-element 等）在
+    message-content 之外，其文字不属于本条正文。纯图 / 表情包没有文字，返回空串。"""
     parts = []
-    for el in walk(ax, container, limit=200):
-        if ax.role(el) == "AXStaticText":
-            t = ax.value(el)
-            if t.strip():
-                r = ax.rect(el)
-                parts.append((r[0] if r else 0.0, t))
-    parts.sort(key=lambda p: p[0])
-    return "".join(t for _, t in parts).strip()
+
+    def prune(el) -> bool:
+        return el is not container and MSG_CLASS in ax.classes(el)   # 根容器本身要下探
+
+    for el in walk(ax, container, limit=200, prune=prune):
+        if "message-content" not in ax.classes(el):
+            continue
+        for sub in walk(ax, el, limit=100):
+            if ax.role(sub) == "AXStaticText":
+                t = ax.value(sub)
+                if t.strip():
+                    parts.append(t)
+    return "".join(parts).strip()
 
 
 def extract_messages(ax, window, editor, max_messages: int = MAX_MESSAGES) -> list[Message]:
@@ -154,9 +187,15 @@ def extract_messages(ax, window, editor, max_messages: int = MAX_MESSAGES) -> li
         return []
     ed_rect = ax.rect(editor) if editor is not None else None
     wx, wy, ww, wh = win_rect
+    base_prune = _window_prune(ax, win_rect)
+
+    def prune(el) -> bool:
+        # 命中 msg-content-container 即整条处理、不再下探：嵌套容器是引用回复，下探会重复产出
+        return MSG_CLASS in ax.classes(el) or base_prune(el)
+
     out: list[Message] = []
     sender = None
-    for el in walk(ax, window):
+    for el in walk(ax, window, prune=prune):
         cls = ax.classes(el)
         if AVATAR_CLASS in cls:
             sender = ax.desc(el).strip() or None
@@ -337,7 +376,10 @@ def locate_input(win: dict, ax=None) -> dict:
     if rect is None:
         result["reason"] = "输入控件坐标不可读取"
         return result
-    bounds = tuple(float(win[k]) for k in ("x", "y", "w", "h"))
+    vals = [win.get(k) for k in ("x", "y", "w", "h")]
+    if any(v is None for v in vals):
+        return result                        # 缺几何键：无从比对，视同未取得控件
+    bounds = tuple(float(v) for v in vals)
     if not _inside(rect, bounds):
         result["reason"] = "输入控件不在当前 QQ 窗口内"
         return result
@@ -353,8 +395,12 @@ def _norm(s: str) -> str:
     return "".join(c for c in unicodedata.normalize("NFKC", s or "") if not c.isspace())
 
 
-def _landed(current: str, text: str) -> bool:
-    return bool(current) and _norm(text) in _norm(current)
+def _landed(before: str, after: str, text: str) -> bool:
+    """读回校验：内容真的变了（after != before）且归一化后以新文本结尾。
+
+    只查子串会把「草稿已包含回复」误判成已填入——对齐 fill.py 的 endswith 与
+    visual_fill 的 after != before。"""
+    return after != before and _norm(after).endswith(_norm(text))
 
 
 def fill_text(text: str, target=None, ax=None) -> tuple[bool, str]:
@@ -380,27 +426,51 @@ def fill_text(text: str, target=None, ax=None) -> tuple[bool, str]:
         if (editor is None or editor != target["box"]
                 or not fill._same_rect(fresh["rect"], target["rect"])):
             return False, "输入目标已变化，请等检测框更新后重试"
-        current = ax.value(editor)
+        current = ax.value_or_none(editor)
+        if current is None:
+            return False, REASON_UNREADABLE
         if fill._duplicate_blocked(text, current, _LAST_FILL, time.monotonic()):
             return False, fill.REASON_DUPLICATE
         base = current if current.strip() else ""     # 空编辑器读出 "\n"，不能当前缀
         if fill._ax_set_value(editor, base + text):
             landed = ax.value(editor)
-            if _landed(landed, text):
+            if _landed(current, landed, text):
                 _LAST_FILL = (text, landed, time.monotonic())
                 return True, "已填入"
-        ok, reason = _type_text(text, editor, app, ax)
+        try:
+            ok, reason = _type_text(text, editor, app, ax)
+        except Exception:
+            return False, "输入过程异常，请先检查草稿，勿重复点击"
         if ok:
-            _LAST_FILL = (text, ax.value(editor), time.monotonic())
+            _LAST_FILL = (text, ax.value_or_none(editor) or "", time.monotonic())
         return ok, reason
     finally:
         _FILL_LOCK.release()
 
 
+def _utf16_chunks(text: str, size: int = 20) -> list[str]:
+    """按 UTF-16 单元（≤ size）切段，不拆开代理对——emoji 在 UTF-16 里占两个单元。"""
+    units = text.encode("utf-16-le")
+    total = len(units) // 2
+    out = []
+    i = 0
+    while i < total:
+        j = min(i + size, total)
+        if j < total and (units[2 * j - 2] & 0xFC) == 0xD8:
+            j -= 1                                # 边界落在代理对中间，高位代理归下一段
+        out.append(units[2 * i:2 * j].decode("utf-16-le"))
+        i = j
+    return out
+
+
 def _type_text(text: str, editor, app, ax) -> tuple[bool, str]:
-    """键盘事件后备：AX 置焦编辑器、激活 QQ、按 20 字一段发 Unicode 键入事件，再读回校验。
+    """键盘事件后备：AX 置焦编辑器、激活 QQ、按 20 个 UTF-16 单元一段发 Unicode 键入事件，
+    每段发出前复查前台与编辑器焦点，最后读回校验（变化 + 结尾）。
     已有草稿时停止（不覆盖、不追加），永远不按回车。"""
-    if ax.value(editor).strip():
+    before = ax.value_or_none(editor)
+    if before is None:
+        return False, REASON_UNREADABLE
+    if before.strip():
         return False, REASON_DRAFT
     try:
         AS.AXUIElementSetAttributeValue(editor, AS.kAXFocusedAttribute, True)
@@ -413,9 +483,15 @@ def _type_text(text: str, editor, app, ax) -> tuple[bool, str]:
         return False, "QQ 没有获得焦点，请先点 QQ 输入区再重试"
     if not fill._ax_attr(editor, AS.kAXFocusedAttribute):
         return False, "输入框未获得焦点，请先点 QQ 输入区再重试"
-    plain = text.replace("\n", " ").replace("\t", " ")
-    for offset in range(0, len(plain), 20):
-        chunk = plain[offset:offset + 20]
+    plain = plain_text(text)
+    if not plain.strip():
+        return False, fill.REASON_EMPTY
+    for chunk in _utf16_chunks(plain, 20):
+        # 打字有秒级跨度，焦点可能中途被抢走：每段发出前都要复核
+        front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        if (front is None or front.processIdentifier() != app.processIdentifier()
+                or not fill._ax_attr(editor, AS.kAXFocusedAttribute)):
+            return False, "窗口或焦点变化，输入已中止；请检查草稿，勿重复点击"
         for down in (True, False):
             ev = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
             Quartz.CGEventSetFlags(ev, 0)
@@ -423,7 +499,10 @@ def _type_text(text: str, editor, app, ax) -> tuple[bool, str]:
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
         time.sleep(0.03)
     time.sleep(0.25)
-    if _landed(ax.value(editor), plain):
+    after = ax.value_or_none(editor)
+    if after is None:
+        return False, REASON_UNREADABLE
+    if _landed(before, after, plain):
         return True, "已填入（键盘输入，未发送）"
     return False, "已尝试输入，未能确认；请检查草稿，勿重复点击"
 
