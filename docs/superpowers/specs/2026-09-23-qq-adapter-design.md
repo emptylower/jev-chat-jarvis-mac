@@ -40,7 +40,7 @@
 | 虚拟列表滚出可视区的消息节点仍在树中，但高度为 1 | 同上 |
 | 只开紧凑模式时，AX 只暴露 369×580 的会话列表窗口；点开聊天后多出一个带编辑器的窗口 | 两次探测对比 |
 
-**待复核（实现计划第一步）：** 对方消息的 class 名（预计为 `container--others` 一类，取「不含 `container--self`」即视为对方作为兜底）；群聊里昵称文本节点的位置；AX 对 ProseMirror 编辑器 `kAXValueAttribute` 设值是否生效。
+**复核结论（2026-09-23 实测）：** 对方消息 class 为 `container--others`（解析只依赖「不含 `container--self`」，实测值仅作参考）；单聊消息区没有昵称文本节点，发送者名字来自 `avatar-span` 的 `AXDescription`，消息区裸文本只有时间分隔符（父节点 class 含 `message__timestamp` / `no-copy`），不在 `message-content` 内，解析时不会混入正文；AX 对 ProseMirror 编辑器设值 **不生效**（`err=0` 但读回仍为 `"\n"`），`fill_text` 落到键盘后备。
 
 ## 3. 架构
 
