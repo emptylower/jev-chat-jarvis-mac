@@ -11,11 +11,19 @@ ExEditor-qq-msg-editor 的 AXTextArea，其 AXDescription 是未截断的联系�
 from __future__ import annotations
 
 import hashlib
+import sys
+import time
+from pathlib import Path
 
+import AppKit
 import ApplicationServices as AS
+import Quartz
+
+if __name__ == "__main__" and not __package__:   # CLI 自测：python src/apps/qq.py 时把 src/ 挂进 path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import fill
-from perception import Message
+from perception import Message, WindowInfo
 
 KEY = "qq"
 DISPLAY_NAME = "QQ"
@@ -28,6 +36,10 @@ SELF_CLASS = "container--self"
 AVATAR_CLASS = "avatar-span"
 MAX_NODES = 3000        # 一次遍历的节点上限：一个繁忙群聊每条可见消息约 8 个节点
 MAX_MESSAGES = 12
+
+ERR_NO_APP = "没找到 QQ 应用"
+ERR_NO_WINDOW = "QQ 聊天窗口未找到"
+ERR_EMPTY_TREE = "QQ 无障碍树为空，请重启 QQ 后重试"
 
 
 class AXReader:
@@ -171,9 +183,160 @@ def fingerprint(title: str, msgs: list[Message]) -> bytes:
     return h.digest()
 
 
+# ------------------------------------------------------------------ 进程与窗口
+
+def qq_app():
+    """运行中的 QQ：bundle id 优先，显示名兜底；没有则 None。"""
+    try:
+        apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(BUNDLE_IDS[0])
+        if apps and len(apps) > 0:
+            return apps[0]
+    except Exception:
+        pass
+    try:
+        for app in AppKit.NSWorkspace.sharedWorkspace().runningApplications():
+            if (app.localizedName() or "") in APP_NAMES:
+                return app
+    except Exception:
+        pass
+    return None
+
+
+_enabled_pids: set[int] = set()
+
+
+def app_element(pid: int, force: bool = False):
+    """QQ 进程的 AX 根元素。Electron 只有在设过 AXManualAccessibility 后才建完整树，
+    每个 pid 设一次；树为空时调用方传 force=True 重设（不重启任何进程）。"""
+    el = AS.AXUIElementCreateApplication(pid)
+    if force or pid not in _enabled_pids:
+        try:
+            AS.AXUIElementSetAttributeValue(el, "AXManualAccessibility", True)
+        except Exception:
+            pass
+        _enabled_pids.add(pid)
+    return el
+
+
+def chat_window(ax, app_el):
+    """带消息编辑器的窗口：焦点窗口优先，否则面积最大。返回 (window, editor) 或 (None, None)。"""
+    cands = []
+    for w in ax.windows(app_el):
+        ed = find_editor(ax, w)
+        if ed is not None:
+            cands.append((w, ed))
+    if not cands:
+        return None, None
+    focused = ax.focused_window(app_el)
+    if focused is not None:
+        for w, ed in cands:
+            if w == focused:
+                return w, ed
+
+    def area(pair):
+        r = ax.rect(pair[0])
+        return r[2] * r[3] if r else 0.0
+    return max(cands, key=area)
+
+
+def window_id(pid: int, rect) -> int:
+    """按 pid + 几何在 CGWindowList 反查窗口 id；找不到返回 0，不阻断读消息。"""
+    if rect is None:
+        return 0
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    try:
+        wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
+    except Exception:
+        return 0
+    for wi in wins:
+        if int(wi.get("kCGWindowOwnerPID") or 0) != pid:
+            continue
+        b = dict(wi.get("kCGWindowBounds") or {})
+        cand = (float(b.get("X", 0)), float(b.get("Y", 0)),
+                float(b.get("Width", 0)), float(b.get("Height", 0)))
+        if fill._same_rect(cand, tuple(rect)):
+            return int(wi.get("kCGWindowNumber") or 0)
+    return 0
+
+
+def find_window(previous_wid=None, ax=None) -> WindowInfo | None:
+    """当前 QQ 聊天窗口（previous_wid 只为接口对齐：焦点窗口优先于粘住旧窗口）。"""
+    ax = ax or AXReader()
+    app = qq_app()
+    if app is None:
+        return None
+    pid = app.processIdentifier()
+    win, editor = chat_window(ax, app_element(pid))
+    if win is None:
+        return None
+    r = ax.rect(win)
+    if r is None:
+        return None
+    return WindowInfo(wid=window_id(pid, r), pid=pid, title=chat_title(ax, win, editor),
+                      x=r[0], y=r[1], w=r[2], h=r[3])
+
+
+def read_conversation(max_messages: int = MAX_MESSAGES, previous_wid=None,
+                      prev_fingerprint=None, prev_layout=None, ax=None) -> dict:
+    """一次读取：找窗口 → 遍历 AX 树 → 消息。返回结构与 perception.read_conversation 同构。"""
+    t0 = time.perf_counter()
+    ax = ax or AXReader()
+    if not fill.has_accessibility():
+        return {"ok": False, "error": fill.REASON_NO_ACCESS, "messages": []}
+    app = qq_app()
+    if app is None:
+        return {"ok": False, "error": ERR_NO_APP, "messages": []}
+    pid = app.processIdentifier()
+    app_el = app_element(pid)
+    if not ax.windows(app_el):
+        app_element(pid, force=True)      # 下一跳再试；不自动重启进程
+        return {"ok": False, "error": ERR_EMPTY_TREE, "messages": []}
+    win, editor = chat_window(ax, app_el)
+    r = ax.rect(win) if win is not None else None
+    if win is None or r is None:
+        return {"ok": False, "error": ERR_NO_WINDOW, "messages": []}
+    wid = window_id(pid, r)
+    title = chat_title(ax, win, editor)
+    window = {"wid": wid, "title": title, "x": r[0], "y": r[1], "w": r[2], "h": r[3]}
+    ed_rect = ax.rect(editor)
+    input_rect = tuple(ed_rect) if ed_rect else None
+    layout = (wid, r[2], r[3])
+    msgs = extract_messages(ax, win, editor, max_messages=max_messages)
+    fp = fingerprint(title, msgs)
+    total = (time.perf_counter() - t0) * 1000
+    timing = {"capture": total, "ocr": 0.0, "total": total, "capture_path": "ax"}
+    base = {"ok": True, "layout": layout, "input_rect": input_rect, "input_unresolved": False,
+            "chat_title": title, "window": window, "fingerprint": fp, "timing_ms": timing}
+    if layout == prev_layout and fp == prev_fingerprint:
+        return dict(base, unchanged=True, messages=[], n_blocks=0)
+    return dict(base, unchanged=False, messages=msgs, n_blocks=len(msgs))
+
+
 class QQApp:
     key = KEY
     display_name = DISPLAY_NAME
     bundle_ids = BUNDLE_IDS
     app_names = APP_NAMES
     needs_screen_capture = False
+
+    def find_window(self, previous_wid=None):
+        return find_window(previous_wid)
+
+    def read_conversation(self, **kwargs):
+        return read_conversation(**kwargs)
+
+    def warm(self):
+        return None      # AX 路径没有一次性加载
+
+
+if __name__ == "__main__":
+    res = read_conversation()
+    if not res["ok"]:
+        print("ERROR:", res["error"])
+        raise SystemExit(1)
+    w = res["window"]
+    print(f"window wid={w['wid']} {w['w']:.0f}x{w['h']:.0f} title={res['chat_title']!r} "
+          f"ax={res['timing_ms']['total']:.0f}ms n={res['n_blocks']}")
+    print("--- messages (top to bottom) ---")
+    for m in res["messages"]:
+        print(f"  [{m.side:4s}] y={m.y:.3f} sender={m.sender!r} | {m.text}")

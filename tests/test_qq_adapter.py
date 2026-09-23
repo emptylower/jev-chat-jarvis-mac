@@ -155,5 +155,100 @@ class ParseTests(unittest.TestCase):
         self.assertNotEqual(a, qq.fingerprint('王小姐', qq.extract_messages(ax, win2, qq.find_editor(ax, win2))))
 
 
+class WindowTests(unittest.TestCase):
+    def test_list_window_rejected_chat_window_chosen(self):
+        chat = chat_window([])
+        ax = FakeAX(windows=[list_window(), chat], focused=None)
+        win, ed = qq.chat_window(ax, 'app')
+        self.assertIs(win, chat)
+        self.assertIsNotNone(ed)
+
+    def test_focused_chat_window_wins_over_larger_one(self):
+        small = chat_window([]); small.rect = (0.0, 0.0, 800.0, 600.0)
+        big = chat_window([])
+        ax = FakeAX(windows=[big, small], focused=small)
+        self.assertIs(qq.chat_window(ax, 'app')[0], small)
+
+    def test_without_focus_largest_wins(self):
+        small = chat_window([]); small.rect = (0.0, 0.0, 800.0, 600.0)
+        big = chat_window([])
+        ax = FakeAX(windows=[small, big], focused=list_window())
+        self.assertIs(qq.chat_window(ax, 'app')[0], big)
+
+    def test_no_chat_window(self):
+        ax = FakeAX(windows=[list_window()])
+        self.assertEqual(qq.chat_window(ax, 'app'), (None, None))
+
+    def test_window_id_lookup_matches_pid_and_bounds(self):
+        cg = [{'kCGWindowOwnerPID': 5, 'kCGWindowNumber': 42,
+               'kCGWindowBounds': {'X': 311, 'Y': 143, 'Width': 1106, 'Height': 782}},
+              {'kCGWindowOwnerPID': 5, 'kCGWindowNumber': 7,
+               'kCGWindowBounds': {'X': 599, 'Y': 260, 'Width': 369, 'Height': 580}}]
+        with patch('Quartz.CGWindowListCopyWindowInfo', return_value=cg):
+            self.assertEqual(qq.window_id(5, WIN), 42)
+            self.assertEqual(qq.window_id(6, WIN), 0)
+            self.assertEqual(qq.window_id(5, (0, 0, 10, 10)), 0)
+
+
+class ReadConversationTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(qq.fill, 'has_accessibility', return_value=True))
+        self.enterContext(patch.object(qq, 'qq_app', return_value=_FakeRunningApp(5)))
+        self.enterContext(patch.object(qq, 'app_element', return_value='app-el'))
+        self.enterContext(patch.object(qq, 'window_id', return_value=42))
+
+    def test_reads_messages_title_window_and_input_rect(self):
+        win = chat_window([message('在吗', 'them', 300.0), message('在', 'me', 360.0)])
+        ax = FakeAX(windows=[list_window(), win], focused=win)
+        res = qq.read_conversation(ax=ax)
+        self.assertTrue(res['ok']); self.assertFalse(res['unchanged'])
+        self.assertEqual(res['chat_title'], '很难约的王小姐')
+        self.assertEqual(res['window'], {'wid': 42, 'title': '很难约的王小姐', 'x': 311.0, 'y': 143.0, 'w': 1106.0, 'h': 782.0})
+        self.assertEqual([m.text for m in res['messages']], ['在吗', '在'])
+        self.assertEqual(res['input_rect'], (311.0, 753.0, 1098.0, 169.0))
+        self.assertFalse(res['input_unresolved'])
+        self.assertEqual(res['layout'], (42, 1106.0, 782.0))
+        self.assertEqual(res['timing_ms']['capture_path'], 'ax')
+        self.assertEqual(res['n_blocks'], 2)
+
+    def test_unchanged_short_circuit(self):
+        win = chat_window([message('在吗', 'them', 300.0)])
+        ax = FakeAX(windows=[win], focused=win)
+        first = qq.read_conversation(ax=ax)
+        again = qq.read_conversation(ax=ax, prev_fingerprint=first['fingerprint'], prev_layout=first['layout'])
+        self.assertTrue(again['ok']); self.assertTrue(again['unchanged'])
+        self.assertEqual(again['messages'], [])
+        self.assertEqual(again['window'], first['window'])
+        resized = qq.read_conversation(ax=ax, prev_fingerprint=first['fingerprint'], prev_layout=(42, 900.0, 782.0))
+        self.assertFalse(resized['unchanged'])
+
+    def test_no_chat_window_error(self):
+        ax = FakeAX(windows=[list_window()])
+        res = qq.read_conversation(ax=ax)
+        self.assertEqual((res['ok'], res['error'], res['messages']), (False, qq.ERR_NO_WINDOW, []))
+
+    def test_empty_tree_error_and_flag_reset(self):
+        ax = FakeAX(windows=[])
+        with patch.object(qq, 'app_element') as ae:
+            res = qq.read_conversation(ax=ax)
+            self.assertEqual((res['ok'], res['error']), (False, qq.ERR_EMPTY_TREE))
+            ae.assert_any_call(5, force=True)
+
+    def test_no_accessibility(self):
+        with patch.object(qq.fill, 'has_accessibility', return_value=False):
+            res = qq.read_conversation(ax=FakeAX())
+            self.assertEqual((res['ok'], res['error']), (False, qq.fill.REASON_NO_ACCESS))
+
+    def test_no_qq_process(self):
+        with patch.object(qq, 'qq_app', return_value=None):
+            res = qq.read_conversation(ax=FakeAX())
+            self.assertEqual((res['ok'], res['error']), (False, qq.ERR_NO_APP))
+
+
+class _FakeRunningApp:
+    def __init__(self, pid): self._pid = pid
+    def processIdentifier(self): return self._pid
+
+
 if __name__ == '__main__':
     unittest.main()
