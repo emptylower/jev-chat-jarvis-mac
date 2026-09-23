@@ -1,0 +1,42 @@
+# 发版：推 tag（v*）自动构建 .app 并发布 GitHub Release，复用 packaging/release.sh。
+# 产物与校验和本地 ./packaging/release.sh --publish 完全一致（脚本内含解压回验、
+# SHA256、latest 指针自检、稳定链接自检）；公告草稿平时由 Release Drafter 维护
+# （release-drafter.yml），正式 release 的 notes 沿用脚本生成的安装说明 + commit 列表。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-latest
+    # build_app.sh 只拼 bundle（源码 + plist），不装依赖，几十秒的活；
+    # 超时余量给 runner 冷启动和 gh 上传
+    timeout-minutes: 20
+    steps:
+      # fetch-depth: 0：release.sh 生成 notes 要 git describe 找上一版 tag + git log
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: 校验 tag 与 pyproject.toml 版本一致
+        run: |
+          VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' pyproject.toml | head -1)"
+          TAG="${GITHUB_REF_NAME}"
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::tag $TAG 与 pyproject.toml 的 version=$VERSION 不一致。版本号只有 pyproject.toml 一处：改好后删 tag 重打（git tag -d $TAG && git push origin :refs/tags/$TAG）"
+            exit 1
+          fi
+
+      - name: 构建并发布
+        run: ./packaging/release.sh --publish --target "$GITHUB_SHA"
+        env:
+          GH_TOKEN: ${{ github.token }}

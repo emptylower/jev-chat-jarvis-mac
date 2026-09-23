@@ -1,0 +1,21 @@
+# master 每次 push 自动维护一份 draft release（按 PR 标签归类），
+# 作为发版公告草稿：发版时在 Releases 页对照校对；正式发布走推 tag 的
+# Release workflow（release.yml），draft 本身不发布。
+# 配置见 .github/release-drafter.yml
+name: Release Drafter
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  update-draft:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: release-drafter/release-drafter@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

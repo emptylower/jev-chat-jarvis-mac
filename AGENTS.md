@@ -16,7 +16,7 @@
   ```
 
 - 日志：`~/Library/Logs/jev-jarvis.log`，分阶段耗时（读屏/判断/生成/排序/端到端）。**刻意不含消息正文与候选文字**（用户可放心贴 issue），只在事件发生时打、不在每跳打；首次调用标注「首次」。
-- 发版：版本号只有 `pyproject.toml` 一处；`./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。资产命名统一 `jev-jarvis-macos-` 前缀：版本包 `jev-jarvis-macos-v<版本>.zip`、稳定名 `jev-jarvis-macos-latest.zip`（README 下载链接靠它，改名必须三处同步：release.sh + README + 当期 release notes）。
+- 发版：版本号只有 `pyproject.toml` 一处；两条等价路径——推 tag（`git tag vX.Y.Z && git push origin vX.Y.Z`，须与 pyproject 版本一致，Release workflow 在 CI 自动构建+发布）或本地 `./packaging/release.sh --publish` 从**干净 worktree** 构建（zip 解压回验+SHA256+gh release）；无 Apple 公证，首次打开要教右键。资产命名统一 `jev-jarvis-macos-` 前缀：版本包 `jev-jarvis-macos-v<版本>.zip`、稳定名 `jev-jarvis-macos-latest.zip`（README 下载链接靠它，改名必须三处同步：release.sh + README + 当期 release notes）。公告草稿：Release Drafter 随 master push 自动按 PR 标签维护 draft，发版时对照校对。
 - 认领协议：动任何 issue 的代码前，先按 [CONTRIBUTING.md](CONTRIBUTING.md) 完成认领三步自检 + 评论认领 + 设 assignee——多人多 AI 并行扫 issue，不认领必撞车。
 
 ## 架构与硬约束

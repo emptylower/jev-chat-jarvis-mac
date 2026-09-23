@@ -1,0 +1,30 @@
+# Release Drafter 配置：按 PR 标签自动归类到 draft release 的分类，
+# enhancement → minor、bug/documentation → patch。draft 仅作公告草稿参考，
+# 正式版本号以 pyproject.toml + tag 为准。发版时人工审核后由 Release workflow 发布。
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+# template 为 release-drafter v6 必填项，缺失时 workflow 报 Invalid config file
+template: |
+  ## 更新内容
+
+  $CHANGES
+
+categories:
+  - title: '✨ 新功能'
+    labels: ['enhancement']
+  - title: '🐛 修复'
+    labels: ['bug']
+  - title: '📝 文档'
+    labels: ['documentation']
+  - title: '🧹 其他'
+    labels: []
+
+change-template: '- $TITLE (#$NUMBER)'
+change-title-escapes: '\<*_&'
+
+version-resolver:
+  minor:
+    labels: ['enhancement']
+  patch:
+    labels: ['bug', 'documentation']
+  default: patch
