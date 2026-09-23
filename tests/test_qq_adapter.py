@@ -250,5 +250,87 @@ class _FakeRunningApp:
     def processIdentifier(self): return self._pid
 
 
+class FillTests(unittest.TestCase):
+    def setUp(self):
+        self.win = chat_window([])
+        self.editor = qq.find_editor(FakeAX(), self.win)
+        self.ax = FakeAX(windows=[self.win], focused=self.win)
+        self.enterContext(patch.object(qq.fill, 'has_accessibility', return_value=True))
+        self.enterContext(patch.object(qq, 'qq_app', return_value=_FakeRunningApp(5)))
+        self.enterContext(patch.object(qq, 'app_element', return_value='app-el'))
+        self.enterContext(patch.object(qq, '_LAST_FILL', None))
+        self.window = {'wid': 42, 'x': 311.0, 'y': 143.0, 'w': 1106.0, 'h': 782.0}
+
+    def test_locate_input_returns_editor_rect(self):
+        t = qq.locate_input(self.window, ax=self.ax)
+        self.assertIs(t['box'], self.editor)
+        self.assertEqual(t['rect'], (311.0, 753.0, 1098.0, 169.0))
+        self.assertEqual(t['reason'], '填入目标')
+
+    def test_locate_input_without_permission_does_not_traverse(self):
+        with patch.object(qq.fill, 'has_accessibility', return_value=False), \
+             patch.object(qq, 'chat_window') as cw:
+            t = qq.locate_input(self.window, ax=self.ax)
+            self.assertIsNone(t['box']); self.assertEqual(t['reason'], qq.fill.REASON_NO_ACCESS)
+            cw.assert_not_called()
+
+    def test_locate_input_rejects_editor_outside_window(self):
+        t = qq.locate_input(dict(self.window, x=0.0, y=0.0, w=100.0, h=100.0), ax=self.ax)
+        self.assertIsNone(t['box']); self.assertIn('不在当前 QQ 窗口内', t['reason'])
+
+    def _fill(self, text, set_ok=True, landed=None, typed=(False, '')):
+        """桩掉 AX 设值：设值「生效」后编辑器读回 landed；不碰真实 AX。"""
+        target = qq.locate_input(self.window, ax=self.ax)
+
+        def fake_set(box, value):
+            if landed is not None:
+                box.value = landed
+            return set_ok
+
+        with patch.object(qq.fill, '_ax_set_value', side_effect=fake_set) as setter, \
+             patch.object(qq, '_type_text', return_value=typed) as typer:
+            result = qq.fill_text(text, target=target, ax=self.ax)
+        return result, setter, typer
+
+    def test_ax_write_into_empty_editor_and_verify(self):
+        (ok, reason), setter, typer = self._fill('你好', landed='你好')
+        self.assertEqual((ok, reason), (True, '已填入'))
+        setter.assert_called_once_with(self.editor, '你好')     # 空编辑器的 "\n" 不当前缀
+        typer.assert_not_called()
+
+    def test_ax_write_appends_to_draft(self):
+        self.editor.value = '草稿'
+        (ok, _), setter, _ = self._fill('你好', landed='草稿你好')
+        self.assertTrue(ok)
+        setter.assert_called_once_with(self.editor, '草稿你好')
+
+    def test_falls_back_to_typing_when_ax_write_does_not_land(self):
+        (ok, reason), setter, typer = self._fill('你好', set_ok=True, landed='\n', typed=(True, '已填入（键盘输入，未发送）'))
+        self.assertEqual((ok, reason), (True, '已填入（键盘输入，未发送）'))
+        typer.assert_called_once()
+
+    def test_changed_target_never_writes(self):
+        target = qq.locate_input(self.window, ax=self.ax)
+        other = editor(); other.rect = (311.0, 700.0, 1098.0, 222.0)
+        self.win.children[0].children[-1].children = [other]
+        with patch.object(qq.fill, '_ax_set_value') as setter:
+            ok, reason = qq.fill_text('你好', target=target, ax=self.ax)
+        self.assertFalse(ok); self.assertIn('目标已变化', reason); setter.assert_not_called()
+
+    def test_double_click_is_ignored(self):
+        self._fill('你好', landed='你好')
+        (ok, reason), setter, _ = self._fill('你好', landed='你好')
+        self.assertFalse(ok); self.assertEqual(reason, qq.fill.REASON_DUPLICATE); setter.assert_not_called()
+
+    def test_empty_text_and_missing_target(self):
+        self.assertEqual(qq.fill_text('  ', target=None, ax=self.ax), (False, qq.fill.REASON_EMPTY))
+        self.assertEqual(qq.fill_text('x', target=None, ax=self.ax), (False, qq.REASON_NO_INPUT))
+
+    def test_typing_refuses_existing_draft(self):
+        self.editor.value = '草稿'
+        ok, reason = qq._type_text('你好', self.editor, _FakeRunningApp(5), self.ax)
+        self.assertFalse(ok); self.assertEqual(reason, qq.REASON_DRAFT)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import threading
 import time
+import unicodedata
 from pathlib import Path
 
 import AppKit
@@ -40,6 +42,9 @@ MAX_MESSAGES = 12
 ERR_NO_APP = "没找到 QQ 应用"
 ERR_NO_WINDOW = "QQ 聊天窗口未找到"
 ERR_EMPTY_TREE = "QQ 无障碍树为空，请重启 QQ 后重试"
+
+REASON_NO_INPUT = "未取得可用的 QQ 输入控件"
+REASON_DRAFT = "输入区已有草稿；请使用复制手动插入，避免改动现有内容"
 
 
 class AXReader:
@@ -312,6 +317,117 @@ def read_conversation(max_messages: int = MAX_MESSAGES, previous_wid=None,
     return dict(base, unchanged=False, messages=msgs, n_blocks=len(msgs))
 
 
+# ------------------------------------------------------------------ 填入（唯一写动作）
+
+def locate_input(win: dict, ax=None) -> dict:
+    """只读定位：编辑器 AXTextArea 及其屏幕矩形。结构与 fill.locate_input 相同。"""
+    result = {"box": None, "rect": None, "window": win, "reason": REASON_NO_INPUT}
+    if not fill.has_accessibility():
+        result["reason"] = fill.REASON_NO_ACCESS
+        return result
+    ax = ax or AXReader()
+    app = qq_app()
+    if app is None:
+        result["reason"] = ERR_NO_APP
+        return result
+    _win, editor = chat_window(ax, app_element(app.processIdentifier()))
+    if editor is None:
+        return result
+    rect = ax.rect(editor)
+    if rect is None:
+        result["reason"] = "输入控件坐标不可读取"
+        return result
+    bounds = tuple(float(win[k]) for k in ("x", "y", "w", "h"))
+    if not _inside(rect, bounds):
+        result["reason"] = "输入控件不在当前 QQ 窗口内"
+        return result
+    result.update(box=editor, rect=tuple(rect), reason="填入目标")
+    return result
+
+
+_FILL_LOCK = threading.Lock()
+_LAST_FILL: tuple[str, str, float] | None = None   # (text, editor content after fill, ts)
+
+
+def _norm(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFKC", s or "") if not c.isspace())
+
+
+def _landed(current: str, text: str) -> bool:
+    return bool(current) and _norm(text) in _norm(current)
+
+
+def fill_text(text: str, target=None, ax=None) -> tuple[bool, str]:
+    """把候选写进 QQ 输入框：AX 设值优先并读回校验；ProseMirror 拒收时退到键盘事件。
+    不发送、不用剪贴板、失败不自动重试。"""
+    global _LAST_FILL
+    text = (text or "").strip()
+    if not text:
+        return False, fill.REASON_EMPTY
+    if not _FILL_LOCK.acquire(blocking=False):
+        return False, fill.REASON_BUSY
+    try:
+        if not fill.has_accessibility():
+            return False, fill.REASON_NO_ACCESS
+        ax = ax or AXReader()
+        app = qq_app()
+        if app is None:
+            return False, ERR_NO_APP
+        if target is None or target.get("box") is None:
+            return False, REASON_NO_INPUT
+        fresh = locate_input(target["window"], ax=ax)
+        editor = fresh["box"]
+        if (editor is None or editor != target["box"]
+                or not fill._same_rect(fresh["rect"], target["rect"])):
+            return False, "输入目标已变化，请等检测框更新后重试"
+        current = ax.value(editor)
+        if fill._duplicate_blocked(text, current, _LAST_FILL, time.monotonic()):
+            return False, fill.REASON_DUPLICATE
+        base = current if current.strip() else ""     # 空编辑器读出 "\n"，不能当前缀
+        if fill._ax_set_value(editor, base + text):
+            landed = ax.value(editor)
+            if _landed(landed, text):
+                _LAST_FILL = (text, landed, time.monotonic())
+                return True, "已填入"
+        ok, reason = _type_text(text, editor, app, ax)
+        if ok:
+            _LAST_FILL = (text, ax.value(editor), time.monotonic())
+        return ok, reason
+    finally:
+        _FILL_LOCK.release()
+
+
+def _type_text(text: str, editor, app, ax) -> tuple[bool, str]:
+    """键盘事件后备：AX 置焦编辑器、激活 QQ、按 20 字一段发 Unicode 键入事件，再读回校验。
+    已有草稿时停止（不覆盖、不追加），永远不按回车。"""
+    if ax.value(editor).strip():
+        return False, REASON_DRAFT
+    try:
+        AS.AXUIElementSetAttributeValue(editor, AS.kAXFocusedAttribute, True)
+    except Exception:
+        pass
+    app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+    time.sleep(0.15)
+    front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    if front is None or front.processIdentifier() != app.processIdentifier():
+        return False, "QQ 没有获得焦点，请先点 QQ 输入区再重试"
+    if not fill._ax_attr(editor, AS.kAXFocusedAttribute):
+        return False, "输入框未获得焦点，请先点 QQ 输入区再重试"
+    plain = text.replace("\n", " ").replace("\t", " ")
+    for offset in range(0, len(plain), 20):
+        chunk = plain[offset:offset + 20]
+        for down in (True, False):
+            ev = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+            Quartz.CGEventSetFlags(ev, 0)
+            Quartz.CGEventKeyboardSetUnicodeString(ev, len(chunk.encode("utf-16-le")) // 2, chunk)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+        time.sleep(0.03)
+    time.sleep(0.25)
+    if _landed(ax.value(editor), plain):
+        return True, "已填入（键盘输入，未发送）"
+    return False, "已尝试输入，未能确认；请检查草稿，勿重复点击"
+
+
 class QQApp:
     key = KEY
     display_name = DISPLAY_NAME
@@ -324,6 +440,12 @@ class QQApp:
 
     def read_conversation(self, **kwargs):
         return read_conversation(**kwargs)
+
+    def locate_input(self, win):
+        return locate_input(win)
+
+    def fill_text(self, text, target=None):
+        return fill_text(text, target=target)
 
     def warm(self):
         return None      # AX 路径没有一次性加载
