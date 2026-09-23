@@ -30,10 +30,19 @@ def hud_harness():
     for method in methods:
         method.decorator_list = []
     klass = ast.ClassDef(name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])
-    scope = {'fill': SimpleNamespace(locate_input=Mock(return_value={'box': None, 'rect': None, 'reason': 'test'})), 'time': time, 'threading': threading, '_log': lambda *_: None,
-             'frontmost_app_is_wechat': Mock(return_value=True),
+    from apps.registry import UNKNOWN
+    locate = Mock(return_value={'box': None, 'rect': None, 'reason': 'test'})
+    read_conv = Mock()
+    fake_app = SimpleNamespace(key='wechat', display_name='微信', needs_screen_capture=True,
+                               read_conversation=read_conv, locate_input=locate,
+                               fill_text=Mock(return_value=(True, '已填入')), warm=Mock(return_value=0.0))
+    scope = {'fill': SimpleNamespace(locate_input=locate, has_accessibility=Mock(return_value=True),
+                                     request_accessibility=Mock()),
+             'time': time, 'threading': threading, '_log': lambda *_: None,
+             'frontmost_app': Mock(return_value=fake_app), 'FAKE_APP': fake_app, 'UNKNOWN': UNKNOWN,
+             'APPS': (fake_app,),
              'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
-             'read_conversation': Mock(),
+             'read_conversation': read_conv,
              'PALETTE': {'muted': None}, 'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
              'READ_FAILURE_HIDE_S': 2,

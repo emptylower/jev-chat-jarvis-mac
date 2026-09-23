@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src'))
+from apps.registry import UNKNOWN
 from judge import Judge, FallbackJudge, _download_progress
 
 
@@ -200,8 +201,8 @@ def hud_harness():
     module = ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
         name='Harness', bases=[], keywords=[], body=methods, decorator_list=[])], type_ignores=[]))
     scope = {'PALETTE': {'amber': 'amber', 'muted': 'muted', 'red': 'red'},
-            # tick_ 的前台检查在本测试作用域外：None 表示检查不了，tick_ 直接返回
-            'frontmost_app_is_wechat': lambda: None,
+            # tick_ 的前台检查在本测试作用域外：UNKNOWN 表示检查不了，tick_ 直接返回
+            'frontmost_app': lambda: UNKNOWN, 'UNKNOWN': UNKNOWN,
             'time': time}
     exec(compile(module, 'hud.py', 'exec'), scope)
     return scope['Harness']
@@ -214,7 +215,7 @@ class HudStatusTests(unittest.TestCase):
         h._show = Mock()
         h.panel = Mock()
         h.panel.isVisible.return_value = False
-        h._wechat_frontmost = None
+        h._app = None
         h.judge = SimpleNamespace(load_status=None)
         h._model_status = None
         h._paused = True

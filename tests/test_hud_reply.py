@@ -25,9 +25,9 @@ class HudReplyTests(unittest.TestCase):
         self.h = h = Harness()
         HUD['read_conversation'].reset_mock()
         HUD['read_conversation'].side_effect = None
-        HUD['frontmost_app_is_wechat'].reset_mock()
-        HUD['frontmost_app_is_wechat'].side_effect = None
-        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['frontmost_app'].reset_mock()
+        HUD['frontmost_app'].side_effect = None
+        HUD['frontmost_app'].return_value = HUD['FAKE_APP']
         HUD['screen_capture_ok'].reset_mock()
         HUD['screen_capture_ok'].return_value = True
         for name, value in dict(
@@ -38,7 +38,7 @@ class HudReplyTests(unittest.TestCase):
             _pregen_req=None, _pregen_result=None, _pregen_running=False,
             _prejudging=False, _paused=False, _analyzing=False,
             _stable_n=0, last_change_ts=0, last_analyze_ts=0,
-            _wechat_frontmost=None, _foreground_epoch=0,
+            _app=None, _asked_accessibility=False, _foreground_epoch=0,
             _read_fail_since=None, _read_fail_hidden=False,
             _prejudge_event=threading.Event(), _pregen_event=threading.Event(),
             slot_tones=['normal'], _stream_rows={}, _last_context=None,
@@ -87,7 +87,7 @@ class HudReplyTests(unittest.TestCase):
         self.h._push_reply('applyCandidates:', 'old replies', epoch)
         self.read([block('下午开会', .40, .70, .15)], title=titles[1])
         self.assertGreater(self.h._reply_epoch, epoch)
-        self.assertEqual(self.h._reply_key, ('李经理', '下午开会'))
+        self.assertEqual(self.h._reply_key, ('wechat', '李经理', '下午开会'))
         self.assertEqual(self.h._prejudge_req[0], '下午开会')
         self.assertEqual(self.h._pregen_req[0], '下午开会')
         self.flush()
@@ -226,7 +226,7 @@ class HudReplyTests(unittest.TestCase):
         self.incoming()
         old_epoch = self.h._reply_epoch
         HUD['read_conversation'].reset_mock()
-        HUD['frontmost_app_is_wechat'].return_value = False
+        HUD['frontmost_app'].return_value = None
         HUD['screen_capture_ok'].return_value = False
 
         self.h._work_inner()
@@ -241,11 +241,11 @@ class HudReplyTests(unittest.TestCase):
         self.assertIsNone(self.h._fingerprint)
 
     def test_return_to_wechat_forces_fresh_window_read(self):
-        self.h._wechat_frontmost = False
+        self.h._app = None
         self.h._win_wid = 7
         self.h._fingerprint = b'old-frame'
         self.h._last_full = {'messages': ['stale']}
-        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['frontmost_app'].return_value = HUD['FAKE_APP']
         HUD['read_conversation'].return_value = {
             'ok': True, 'unchanged': False, 'fingerprint': b'new-frame',
             'window': {'wid': 9}, 'chat_title': 'current', 'messages': [],
@@ -263,7 +263,7 @@ class HudReplyTests(unittest.TestCase):
         old_key = self.h._reply_key
         old_full = self.h._last_full
         HUD['read_conversation'].reset_mock()
-        HUD['frontmost_app_is_wechat'].return_value = None
+        HUD['frontmost_app'].return_value = HUD['UNKNOWN']
 
         self.h._work_inner()
         self.flush()
@@ -275,10 +275,10 @@ class HudReplyTests(unittest.TestCase):
         self.assertIs(self.h._last_full, old_full)
 
     def test_return_with_multiple_wechat_windows_rediscovers_main(self):
-        self.h._wechat_frontmost = False
+        self.h._app = None
         self.h._win_wid = 7
         self.h._fingerprint = b'old-frame'
-        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['frontmost_app'].return_value = HUD['FAKE_APP']
         detached = {
             'kCGWindowOwnerName': 'WeChat', 'kCGWindowNumber': 2,
             'kCGWindowName': '微信 (窗口)', 'kCGWindowOwnerPID': 1,
@@ -307,8 +307,8 @@ class HudReplyTests(unittest.TestCase):
         self.assertEqual(self.h._win_wid, 1)
 
     def test_switch_during_capture_discards_snapshot(self):
-        states = iter([True, False])
-        HUD['frontmost_app_is_wechat'].side_effect = lambda: next(states)
+        states = iter([HUD['FAKE_APP'], None])
+        HUD['frontmost_app'].side_effect = lambda: next(states)
         HUD['read_conversation'].return_value = {
             'ok': True, 'unchanged': False, 'fingerprint': b'stale',
             'window': {'wid': 7}, 'chat_title': 'stale', 'messages': [],
@@ -325,11 +325,11 @@ class HudReplyTests(unittest.TestCase):
         self.assertIsNone(self.h._last_full)
 
     def test_leave_and_return_during_capture_discards_old_snapshot(self):
-        HUD['frontmost_app_is_wechat'].return_value = True
+        HUD['frontmost_app'].return_value = HUD['FAKE_APP']
 
         def read_then_round_trip(**_kwargs):
-            self.h._set_foreground_state(False)
-            self.h._set_foreground_state(True)
+            self.h._set_foreground_state(None)
+            self.h._set_foreground_state(HUD['FAKE_APP'])
             return {
                 'ok': True, 'unchanged': False, 'fingerprint': b'stale',
                 'window': {'wid': 7}, 'chat_title': 'stale', 'messages': [],
@@ -354,7 +354,7 @@ class HudReplyTests(unittest.TestCase):
         self.assertIsNotNone(self.h._read_fail_since)
 
     def test_sustained_read_failure_hides_and_forces_rediscovery(self):
-        self.h._wechat_frontmost = True
+        self.h._app = HUD['FAKE_APP']
         self.h._foreground_epoch = 1
         self.h._win_wid = 7
         self.h._fingerprint = b'old'
