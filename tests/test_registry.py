@@ -43,5 +43,43 @@ class WeChatAppTests(unittest.TestCase):
             wo.assert_called_once_with()
 
 
+class RegistryTests(unittest.TestCase):
+    def test_wechat_by_bundle_id(self):
+        from apps import registry
+        with patch.object(registry, '_frontmost', return_value=('com.tencent.xinWeChat', 'Some Name')):
+            self.assertEqual(registry.frontmost_app().key, 'wechat')
+
+    def test_wechat_by_name_alias(self):
+        from apps import registry
+        for name in ('微信', 'WeChat', 'Weixin'):
+            with patch.object(registry, '_frontmost', return_value=('', name)):
+                self.assertEqual(registry.frontmost_app().key, 'wechat', name)
+
+    def test_qq_by_bundle_id_and_name(self):
+        from apps import registry
+        with patch.object(registry, '_frontmost', return_value=('com.tencent.qq', 'QQ')):
+            self.assertEqual(registry.frontmost_app().key, 'qq')
+        with patch.object(registry, '_frontmost', return_value=('', 'QQ')):
+            self.assertEqual(registry.frontmost_app().key, 'qq')
+
+    def test_sibling_apps_are_not_chat_apps(self):
+        from apps import registry
+        for bundle, name in (('com.google.Chrome', 'Google Chrome'), ('', '微信读书'),
+                             ('com.tencent.WeWorkMac', '企业微信'), ('', 'QQ音乐')):
+            with patch.object(registry, '_frontmost', return_value=(bundle, name)):
+                self.assertIsNone(registry.frontmost_app(), (bundle, name))
+
+    def test_query_failure_is_unknown_not_none(self):
+        from apps import registry
+        with patch.object(registry, '_frontmost', return_value=None):
+            self.assertIs(registry.frontmost_app(), registry.UNKNOWN)
+
+    def test_app_by_key(self):
+        from apps import registry
+        self.assertEqual(registry.app_by_key('qq').display_name, 'QQ')
+        self.assertIsNone(registry.app_by_key('feishu'))
+        self.assertEqual([a.key for a in registry.APPS], ['wechat', 'qq'])
+
+
 if __name__ == '__main__':
     unittest.main()
