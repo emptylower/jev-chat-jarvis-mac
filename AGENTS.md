@@ -1,14 +1,15 @@
 # AGENTS.md
 
-微信悬浮窗助手（macOS）：OCR 读微信窗口 → 本地模型判意图/风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。纯只读、零封号风险是**核心原则**，任何改动不得破坏。
+微信 / QQ 悬浮窗助手（macOS）：微信走 OCR 读窗口、QQ 走系统无障碍树 → 本地模型判意图/风险 → LLM 生成候选回复 → 悬浮窗展示/一键填入。纯只读、零封号风险是**核心原则**，任何改动不得破坏。
 
 ## 目录与命令
 
-- `src/perception.py` 抓图+OCR+抽消息；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
+- `src/perception.py` 抓图+OCR+抽消息；`src/apps/` 聊天 App 适配器层（base.py 协议、wechat.py 转调 perception/fill、qq.py 无障碍树读 QQNT、registry.py 按前台 App 分发）；`src/judge.py` 本地判断（decider-2b）；`src/judge_jev.py` 云端判断（TypeSafe Jev）；`src/generate.py` 候选生成（OpenAI/Anthropic 兼容 API）；`src/hud.py` 悬浮窗+轮询主循环；`src/fill.py` 辅助功能写入；`src/styles.py` 话术；`src/userconfig.py` 配置加载
 - 启动：`./start.command`（用户平时的方式；`Ctrl+C` 退出）。没有正式测试套件，分层自测：
 
   ```bash
   uv run python src/perception.py                  # 感知层（读屏，见下方 CLI 验证陷阱）
+  uv run python src/apps/qq.py                     # QQ 感知层（AX 路径，CLI 里可验）
   uv run python src/judge.py "这个需求你今天跟一下"
   uv run python src/judge_zh_test.py               # 22 条意图回归——改判断层 prompt 后必须重跑
   uv run python src/generate.py --check            # 生成层凭据解析
@@ -34,6 +35,7 @@
 ## 已知的坑
 
 - **CLI 进程里验不了感知层**：独立 shell 进程里 `CGWindowListCreateImage` 会被拒（静默退子进程路径、无指纹）。验证要么用合成 CGImage 测纯函数，要么起真应用看日志。
+- **QQ 走 AX 不走 OCR**：CLI 进程里能直接验；改 QQ 解析先跑 probe/qq_ax_probe.py 看真实 class 名，再改 src/apps/qq.py 顶部常量。填入后备是键盘事件，同样不许改回剪贴板。
 - 坐标系：本模块布局常量（`CHAT_PANE_X_MIN` 等）是**底部原点**（Vision 口径）；`CGImageCreateWithImageInRect` 是**左上原点**，换算别搞反。
 - 生成层**不能用 thinking 模型**（思考吃光 `max_tokens`，候选 0 条，面板只报「生成失败」误导用户）。
 - README 实测数字皆有口径：意图 86.4% 是**无上下文**回归口径，改判断层 prompt 后别直接引用，要重跑 `judge_zh_test.py`；判断耗时引用应用内实测（~1s），不是 benchmark 的 0.75s。`judge_zh_test.py` 直接 import `judge.INTENTS`，测的就是线上 prompt。

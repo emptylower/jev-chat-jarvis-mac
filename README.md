@@ -1,6 +1,6 @@
 # jev-chat-jarvis（macOS）
 
-微信弹出一条消息 → 悬浮窗立刻告诉你**这句话的真实意图**、**风险几级**、**该怎么回**。
+微信或 QQ 弹出一条消息 → 悬浮窗立刻告诉你**这句话的真实意图**、**风险几级**、**该怎么回**。
 
 **纯只读、零封号风险**——不注入、不 hook、不解密数据库，只是「看屏幕 + 本地模型判断」。
 
@@ -9,6 +9,15 @@
 ## 反馈与帮助
 
 **先自查：[常见问题解答（FAQ）](docs/FAQ.md)——配置文件、日志、模型路径、安装报错、旧版空白面板速查。** 交流群、公众号等联系方式见文末[「交流反馈」](#交流反馈)；数据流向与隐私见 [PRIVACY.md](PRIVACY.md)。
+
+## 平台支持
+
+| 平台 | 状态 | 采集方式 | 需要的权限 | 备注 |
+|---|---|---|---|---|
+| 微信 macOS 4.x | ✅ | 窗口截图 + Vision OCR | 屏幕录制（读）+ 辅助功能（填入） | 布局常量按微信 4.1 校准 |
+| QQ macOS 6.9.x（QQNT） | ✅ | 系统无障碍树直接读结构化节点 | 辅助功能（读 + 填入） | 不截图、不 OCR；我方 / 对方按节点 class 判定 |
+
+两者共用同一套判断、生成与悬浮窗；悬浮窗跟随当前在前台的那个应用。
 
 ## 它能做什么
 
@@ -41,7 +50,7 @@ sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
 
 `.app` 若改过名（如「jev-jarvis 2.app」），把命令里的目录名换成实际路径。
 
-首次启动按提示授予「屏幕录制」权限（系统设置 › 隐私与安全性 › 录屏与系统录音，给 **jev-jarvis** 打开），**退出重开**生效；「填入」另需「辅助功能」权限，第一次点会弹系统授权框。v0.3.1 及更早的旧版本还需把 **python3.12** 那条一并打开。
+首次启动按提示授予「屏幕录制」权限（系统设置 › 隐私与安全性 › 录屏与系统录音，给 **jev-jarvis** 打开），**退出重开**生效；「填入」另需「辅助功能」权限，第一次点会弹系统授权框。v0.3.1 及更早的旧版本还需把 **python3.12** 那条一并打开。**只用 QQ** 的话不需要屏幕录制权限，辅助功能一项即可。
 
 缺少可用的 uv 时，两种启动入口都先完整下载并执行官方安装脚本（下载含超时和重试），失败后尝试已有的 Homebrew。失败提示区分网络、证书、磁盘和安装器错误，详细输出见 `~/Library/Logs/jev-jarvis.log`。官方脚本安装到 `~/.local/bin`，不修改 shell 配置。
 
@@ -49,6 +58,7 @@ sudo xattr -r -d com.apple.quarantine /Applications/jev-jarvis.app
 
 ```bash
 uv run python src/perception.py                  # 感知层：识别到的消息 + 耗时
+uv run python src/apps/qq.py                    # QQ 感知层：AX 读到的消息（CLI 里可验）
 uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出判断
 uv run python src/judge_zh_test.py               # 22 条中文意图回归
 uv run python src/generate.py --check            # 生成层凭据解析
@@ -117,6 +127,9 @@ chmod 600 ~/.config/jev-jarvis/env
 - 本地判断模型首次下载时，悬浮窗状态行显示模型权重的大致下载进度和体积（如「下载判断模型 34% · 1.2/3.8 GB」，以实际下载文件为准；进度约每半秒刷新，分块处理时可能跳升）；完成后进入加载/预热，再恢复消息状态。已有缓存时不显示下载进度；Jev 不可用转本地时同样适用。
 - 启动后第一条判断慢是正常现象（本地模型预热）；不对劲先看日志（分阶段耗时、**不含消息正文**，可放心贴 issue）：`tail -40 ~/Library/Logs/jev-jarvis.log`
 - 本地判断模型首次加载（含下载）期间面板状态行显示「判断模型加载中…」；加载失败会红字提示。离线模型未下载时不会自动下载，面板与预热提示会引导选择（配 key 走云端，或模型设置里启用离线判断）。内存不足（总内存 < 12GB，或系统内存压力已在警告档）时**不加载本地模型**，每条消息的面板提示会引导改配 `TYPESAFE_API_KEY` 走云端判断——这是为了防止 #37 那种加载把系统推入内存高压、进程被系统直接终止的情况
+- QQ：只支持独立聊天窗口，紧凑模式（效率模式）的迷你聊天窗不支持；同时开多个聊天窗口时只分析有焦点的那个
+- QQ：图片、表情包、文件等无文字消息读不出内容（与微信 OCR 一致）；引用回复按普通文本处理
+- QQ 改版若变更界面 class 名（`container--self` / `ExEditor-qq-msg-editor`），`src/apps/qq.py` 顶部常量需同步；`uv run python probe/qq_ax_probe.py` 可直接看当前真实取值
 
 ## 输入区检测框与填入
 
@@ -143,7 +156,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - **贡献前必读**：[CONTRIBUTING.md](CONTRIBUTING.md)——动代码前先在 issue 认领（评论 + assignee），分层自测改哪层跑哪层
 - 配置界面自测：`uv run python -B -m unittest discover -s tests`；macOS 原生窗口与按钮流程：`uv run python -B probe/settings_smoke.py`（临时配置 + 本地测试服务，不使用个人密钥）。
 - 打包 `./packaging/build_app.sh`；发版 `./packaging/release.sh --publish`（干净 worktree 构建 + 解压回验 + gh release）。版本号只有 `pyproject.toml` 一处；有开发者证书可加 `--sign "Developer ID Application: ..."`
-- 架构一句话：微信在前台时，进程内抓其窗口 → Vision OCR（只扫聊天区）→ 本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。底层仍按窗口 ID 抓取而不是全屏截图，悬浮窗不污染 OCR
+- 架构一句话：微信在前台时，进程内抓其窗口 → Vision OCR（只扫聊天区）；QQ 在前台时，读其无障碍树 → 同一条管线：本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。底层仍按窗口 ID 抓取而不是全屏截图，悬浮窗不污染 OCR
 
 ## 版权与许可
 
