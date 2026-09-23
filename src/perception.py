@@ -207,7 +207,7 @@ def capture_window(wid: int, out: Path) -> bool:
 # ----------------------------------------------------------------------------- ocr
 
 
-def _vision_blocks(handler, languages, chat_only: bool, input_top=None) -> list[TextBlock]:
+def _vision_blocks(handler, languages, chat_only: bool, input_top=None, region=None) -> list[TextBlock]:
     """Run one Vision text request against a handler that is already built.
 
     Shared by the file path and the in-memory path so the request settings — the part that
@@ -239,12 +239,12 @@ def _vision_blocks(handler, languages, chat_only: bool, input_top=None) -> list[
     req.setRecognitionLanguages_(list(languages))
     req.setUsesLanguageCorrection_(True)
     roi = None
-    if chat_only:
+    if chat_only or region is not None:
         # Vision region of interest: normalized, origin BOTTOM-LEFT. Skipping the chat
         # list roughly halves OCR time. Note Vision then reports each observation's
         # bounding box RELATIVE TO THE ROI, so we convert back to full-window space.
         bottom = INPUT_AREA_Y_MIN if input_top is None else 1.0 - input_top
-        roi = (CHAT_PANE_X_MIN, bottom, 1.0 - CHAT_PANE_X_MIN, 1.0 - bottom)
+        roi = region if region is not None else (CHAT_PANE_X_MIN, bottom, 1.0 - CHAT_PANE_X_MIN, 1.0 - bottom)
         req.setRegionOfInterest_(CGRectMake(*roi))
     handler.performRequests_error_([req], None)
 
@@ -311,11 +311,11 @@ def capture_image(wid: int, nominal: bool = True):
         return None
 
 
-def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True, input_top=None) -> list[TextBlock]:
+def ocr_image(image, languages=("zh-Hans",), chat_only: bool = True, input_top=None, region=None) -> list[TextBlock]:
     """Same request as ocr(), fed a CGImage directly — no PNG encode, no temp file."""
     import Vision
     handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(image, None)
-    return _vision_blocks(handler, languages, chat_only, input_top)
+    return _vision_blocks(handler, languages, chat_only, input_top, region)
 
 
 def warm_ocr() -> float:
@@ -434,7 +434,9 @@ def extract_chat_title(blocks: list[TextBlock]) -> str:
         if b.x - keep[-1].x_right > 1.5 * max(b.h, keep[-1].h):
             break
         keep.append(b)
-    return " ".join(b.text for b in keep).strip()
+    title = " ".join(b.text for b in keep).strip()
+    # WeChat appends a changing member count; it is not part of the conversation key.
+    return re.sub(r"\s*[（(]\s*\d+\s*[）)]\s*$", "", title).strip()
 
 
 def message_side(x: float, width: float) -> str:
@@ -562,8 +564,32 @@ def looks_like_sender_name(msg: Message, following: Message | None) -> bool:
 # ---------------------------------------------------------------------- public API
 
 
+def read_calibrated(image, calibration, window, max_messages=12):
+    """Explicit selected region. Never infer a fill target from a message selection."""
+    from calibrated_messages import extract, recover_numeric_bubbles
+    t0 = time.perf_counter()
+    x,y,w,h = calibration.rect()
+    blocks = ocr_image(image, region=(x,1-y-h,w,h))
+    header = ocr_image(image, region=(x,1-y,w,y))
+    candidates = [b for b in header if not _is_noise(b) and b.x < x+w*.75]
+    title = ""
+    if candidates:
+        top = max(b.y+b.h for b in candidates)
+        line = [b for b in candidates if top-(b.y+b.h) < b.h*.6]
+        title = " ".join(b.text for b in sorted(line,key=lambda b:b.x))
+    blocks = recover_numeric_bubbles(image, blocks, (x,y,w,h))
+    msgs = extract(image, blocks, (x,y,w,h), max_messages)
+    elapsed = (time.perf_counter()-t0)*1000
+    return {"ok": True, "unchanged": False, "window": window, "messages": msgs,
+            "chat_title": title, "n_blocks": len(blocks), "fingerprint": None,
+            "layout": (window['wid'],window['w'],window['h'],calibration.serialize()),
+            "input_rect": None, "manual_calibration": True,
+            "timing_ms": {"capture":0., "ocr":elapsed, "total":elapsed,
+                          "capture_path":"manual"}}
+
+
 def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
-                      prev_fingerprint: bytes | None = None, prev_layout=None) -> dict:
+                      prev_fingerprint: bytes | None = None, prev_layout=None, calibration=None) -> dict:
     """One-shot read: find window -> capture -> OCR -> messages.
 
     Pass the previous call's "fingerprint" and an unchanged chat pane short-circuits
@@ -594,6 +620,13 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
                 from Foundation import NSURL
                 source = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(str(png)), None)
                 image = Quartz.CGImageSourceCreateImageAtIndex(source, 0, None) if source else None
+    if calibration is not None:
+        if image is None:
+            return {"ok": False, "error": "capture failed", "messages": []}
+        if not calibration.matches(win):
+            return {"ok": True, "unchanged": False, "messages": [], "window": window,
+                    "calibration_error": "窗口尺寸已改变，请重新校准消息区域。"}
+        return read_calibrated(image, calibration, window, max_messages)
     from input_region import input_outline
     try:
         outline = input_outline(image) if image is not None else None

@@ -78,6 +78,12 @@ BUILTIN: dict[str, str] = {
         "只回答被问到的：零寒暄、零情绪、零修饰、零表情，能两个字说清就不用五个字，"
         "像一个不太会说话但很靠谱的工程师。不做任何延伸，也不表示关心。"
     ),
+    "夸夸": (
+        "像夸夸群里的金牌群友：夸人夸具体——抓住对方消息里的细节往高了夸（眼光、效率、"
+        "品位都行），语气真诚热络，「绝了」「这也太强了」「服了」随手就来，可以带感叹号；"
+        "夸完顺势把正事接住（该答应的答应、该给时间的给时间）。"
+        "不空泛、不谄媚、不连用三个感叹号，别把夸说成阴阳怪气。"
+    ),
 }
 
 # What the panel starts with. The third slot used to default to 不用; users were found
@@ -88,6 +94,14 @@ NONE_LABEL = "不用"          # the third dropdown's way of saying "only two ca
 
 CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones
 
+# Custom tones under this many characters are refused, not loaded. A two-word
+# instruction ("夸我") gives the model nothing to hold on to — the candidates come back
+# generic, and the panel wears it as our fault. The built-ins run 60–120 chars; 10 is a
+# floor that still admits one honest sentence while blocking pure noise. Refusals land
+# in REJECTED_TONES so the startup log can point at the fix.
+MIN_TONE_DESC_CHARS = 10
+REJECTED_TONES: list[str] = []
+
 
 def _custom_tones() -> dict[str, str]:
     """Tones the user defined in their env file, as `名字=说明` entries separated by `|`.
@@ -97,14 +111,20 @@ def _custom_tones() -> dict[str, str]:
     A same-named entry overrides the built-in one, so the shipped wording can be tuned
     without touching this file. A tone called 不用 is dropped: that label is the panel's
     sentinel for "this slot is switched off", and letting a tone shadow it would make a
-    slot impossible to switch off.
+    slot impossible to switch off. Descriptions shorter than MIN_TONE_DESC_CHARS are
+    refused and recorded in REJECTED_TONES (see that constant).
     """
     raw = userconfig.get(CUSTOM_VAR)
     out: dict[str, str] = {}
     for part in (raw or "").split("|"):
         name, sep, desc = part.partition("=")
         name, desc = name.strip(), desc.strip()
-        if sep and name and desc and name != NONE_LABEL:
+        if sep and name and name != NONE_LABEL:
+            if len(desc) < MIN_TONE_DESC_CHARS:
+                REJECTED_TONES.append(
+                    f"「{name}」说明仅 {len(desc)} 字（至少 {MIN_TONE_DESC_CHARS} 字，"
+                    "写清「什么语气 + 别变成什么」）")
+                continue
             out[name] = desc
     return out
 

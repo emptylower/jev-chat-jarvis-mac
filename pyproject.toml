@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "huggingface-hub>=1.32.0",
     "laya>=0.3.4",
+    "numpy>=2.0",
     "pyobjc-framework-applicationservices>=12.2.2",
     "pyobjc-framework-cocoa>=12.2.2",
     "pyobjc-framework-quartz>=12.2.2",
