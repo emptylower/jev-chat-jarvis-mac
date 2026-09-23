@@ -32,4 +32,6 @@ jobs:
           enable-cache: true
 
       - name: 离线回归
-        run: uv run python -B -m unittest discover -s tests
+        # --locked:uv.lock 与 pyproject.toml 不一致时直接失败，不许静默重解析
+        # （防「本地能跑 CI 挂」或反向漂移；本地开发用不带 --locked 的 uv run 不受影响）
+        run: uv run --locked python -B -m unittest discover -s tests
