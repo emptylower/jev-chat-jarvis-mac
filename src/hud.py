@@ -13,10 +13,11 @@ Design notes
     resizes and monitor changes without any window-server hooks.
   * The HUD uses native macOS vibrancy with semantic WeChat green/amber/red accents. The
     Appearance stays pinned to Aqua so labels and controls keep the same tested contrast.
-  * 「填入」 writes through the Accessibility API into WeChat's input box (src/fill.py): no
-    synthetic keystrokes, no clipboard, and nothing needs to be frontmost. It needs the
-    Accessibility permission; when that is missing the HUD asks for it and reports the
-    failure.
+  * 「填入」 is dispatched through the per-app adapter layer (src/apps/) into the current
+    chat app's input box (WeChat: Accessibility writes via src/fill.py; QQ: AX value-set
+    with a keyboard-events fallback). No clipboard, and nothing is ever sent. It needs
+    the Accessibility permission; when that is missing the HUD asks for it and reports
+    the failure.
 """
 
 from __future__ import annotations
@@ -1028,8 +1029,9 @@ class HudController(NSObject):
         text = self.cand_texts[idx] if 0 <= idx < len(self.cand_texts) else None
         if not text:
             return
-        # The status line is painted before the call because writing into WeChat takes a
-        # beat; the click should look instant even though the write has not happened yet.
+        # The status line is painted before the call because writing into the chat app
+        # takes a beat; the click should look instant even though the write has not
+        # happened yet.
         self._render("status", "填入中…", PALETTE["muted"])
         self.panel.displayIfNeeded()
         app = self._app
@@ -1042,6 +1044,11 @@ class HudController(NSObject):
         target = getattr(self, "_input_target", None)
         if target is None or (target["box"] is None and not target.get("visual_rect")):
             self._render("status", "填入失败：" + (target["reason"] if target else "等待输入框定位"), PALETTE["red"])
+            return
+        if target.get("app") != app.key:
+            # 适配器刚切换、检测框还没更新：目标矩形仍属于上一个 App，写进去会
+            # 填错应用——拒绝并让下一轮 locate_input 刷新目标。
+            self._render("status", "填入失败：输入目标属于另一应用，请等检测框更新后重试", PALETTE["red"])
             return
         ok, reason = app.fill_text(text, target=target)
         if ok:
@@ -1291,7 +1298,7 @@ class HudController(NSObject):
                 # The load just finished; applyHidden_ kept the panel up while it ran,
                 # so a WeChat that left in the meantime is hidden only now (review #41).
                 # The read-failure latch counts too: the panel was kept past the grace
-                # period only for the download's sake — and `is not True` also covers
+                # period only for the download's sake — and `_app is None` also covers
                 # the pre-first-poll None, where foreground was never established.
                 if self.panel.isVisible():
                     self.panel.orderOut_(None)
@@ -1306,6 +1313,7 @@ class HudController(NSObject):
         if app is UNKNOWN or app is self._app:
             return False
 
+        prev = self._app
         self._app = app
         self._foreground_epoch += 1
         self._reply_epoch += 1
@@ -1327,12 +1335,18 @@ class HudController(NSObject):
         self._read_fail_since = None
         self._read_fail_hidden = False
 
-        if app is not None:
-            self._next_read_ts = 0
-            _log(f"前台切换 · {app.display_name}回到前台，强制重新读屏")
-        else:
+        if app is None:
             _log("前台切换 · 聊天应用离开前台，隐藏面板并清空旧结果")
             self._push("applyForegroundHidden:", "微信 / QQ 不在前台")
+        else:
+            self._next_read_ts = 0
+            if prev is not None:
+                # 适配器→适配器（微信→QQ 等）与离开一样是一次硬边界：旧会话与旧候选
+                # 必须下屏，否则点「填入」会把给前一个 App 写的回复填进当前 App。
+                _log(f"前台切换 · 切换到{app.display_name}，清空面板并强制重新读屏")
+                self._push("applyForegroundHidden:", f"已切换到{app.display_name}")
+            else:
+                _log(f"前台切换 · {app.display_name}回到前台，强制重新读屏")
         return True
 
     def tick_(self, timer):
@@ -1404,7 +1418,7 @@ class HudController(NSObject):
             return
         # Re-check after the blocking capture/OCR.  tick_ may have observed a
         # complete leave+return while this worker was busy; in that case even a
-        # currently-frontmost WeChat does not make this old snapshot current.
+        # currently-frontmost chat app does not make this old snapshot current.
         after = frontmost_app()
         if after is UNKNOWN:
             self._next_read_ts = time.time() + FAST_TICK
@@ -1414,7 +1428,7 @@ class HudController(NSObject):
             self._next_read_ts = time.time() + FAST_TICK
             return
         if not res["ok"]:
-            # Window enumeration/capture can miss one frame while WeChat redraws.
+            # Window enumeration/capture can miss one frame while the chat app redraws.
             # Keep the already-current HUD stable for a short grace period, then
             # hide and force rediscovery if the failure really persists.
             now_mono = time.monotonic()
@@ -1483,7 +1497,10 @@ class HudController(NSObject):
         if (res["window"] != getattr(self, "_input_window", None)
                 or now_input >= getattr(self, "_input_next", 0)):
             self._input_target = app.locate_input(res["window"])
-            if self._input_target["box"] is None:
+            self._input_target["app"] = app.key   # 填入前复核：目标必须属于当前 App
+            if self._input_target["box"] is None and app.needs_screen_capture:
+                # 视觉后备要截图/OCR，只有走屏幕采集的 App（微信）才允许进入；
+                # QQ 的 AX 路径绝不截图——box 为 None 就让它保持 None（填入按钮报原因）。
                 from input_region import locate_visual_input
                 self._input_target["visual_rect"] = (res.get("input_rect")
                                                      or locate_visual_input(res["window"]))
@@ -2047,10 +2064,11 @@ class HudController(NSObject):
 
         The warm-up is not a reply run — a message that starts analysing while it
         fails must not be able to swallow this line like it swallows late results.
-        It is still a global panel, though: with WeChat in the background the red
+        It is still a global panel, though: with the chat app in the background the red
         line must not surface over other apps (the foreground boundary stays hard).
         The hint is not lost — every later analysis that hits LowMemoryError reports
-        it again through the epoch-guarded applyError_ path, which WeChat foregrounds.
+        it again through the epoch-guarded applyError_ path, which the chat app
+        foregrounds.
         """
         if self._app is None:
             return
@@ -2163,17 +2181,8 @@ class HudController(NSObject):
 
     # --------------------------------------------------------------- warm-up
     @objc.python_method
-    def _warm(self):
-        """Pay the one-off loads in the background: Vision OCR first, then the judge model.
-
-        The first real message used to carry both costs: Vision's ~0.7 s first OCR and
-        decider-2b's 9-15 s load inside its first judge(). Starting both here, right after
-        launch, moves them to idle time — the fast one first so it is ready within a
-        second, the slow one after. If a message does land mid-warm-up nothing breaks:
-        its judge() blocks on the model's load lock until the warm-up finishes, and the
-        OCR warm-up is independent of WeChat entirely (a blank canvas, not a window).
-        """
-        t0 = time.perf_counter()
+    def _warm_apps(self):
+        """Pay each chat app's one-off read-path load (Vision for WeChat; QQ has none)."""
         for app in APPS:
             ms = app.warm()
             if ms is None:
@@ -2183,6 +2192,20 @@ class HudController(NSObject):
                 _log(f"预热 {app.display_name} 读屏就绪 · {ms:.0f}ms")
             else:
                 _log(f"预热 {app.display_name} 读屏失败 · 首次读屏会稍慢，不影响使用")
+
+    @objc.python_method
+    def _warm(self):
+        """Pay the one-off loads in the background: Vision OCR first, then the judge model.
+
+        The first real message used to carry both costs: Vision's ~0.7 s first OCR and
+        decider-2b's 9-15 s load inside its first judge(). Starting both here, right after
+        launch, moves them to idle time — the fast one first so it is ready within a
+        second, the slow one after. If a message does land mid-warm-up nothing breaks:
+        its judge() blocks on the model's load lock until the warm-up finishes, and the
+        OCR warm-up is independent of the chat app entirely (a blank canvas, not a window).
+        """
+        t0 = time.perf_counter()
+        self._warm_apps()
 
         # #37: the first decider-2b load can take minutes (download included) or die to
         # memory pressure — both used to look identical from outside: a silent panel.

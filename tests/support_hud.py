@@ -25,7 +25,8 @@ def hud_harness():
     names = {'_work_inner', '_set_foreground_state', '_push', '_reply_task', '_reply_current', '_push_reply',
              'applyReplyUpdate_', 'applyWaiting_', '_context_text', '_stream_hook',
              '_take_pregen', '_gen_with_pregen', '_finish_generate',
-             '_prejudge_loop', '_pregen_loop'}
+             '_prejudge_loop', '_pregen_loop',
+             'fillCandidate_', '_warm', '_warm_apps'}
     methods = [n for n in source.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for method in methods:
         method.decorator_list = []
@@ -43,7 +44,8 @@ def hud_harness():
              'APPS': (fake_app,),
              'screen_capture_ok': Mock(return_value=True), 'request_screen_capture': Mock(),
              'read_conversation': read_conv,
-             'PALETTE': {'muted': None}, 'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
+              'PALETTE': {'muted': None, 'red': 'RED', 'green': 'GREEN'},
+              'CONTEXT_TURNS': 8, 'JUDGE_TURNS': 4,
              'SLOW_TICK': 1, 'BURST_TICK': .45, 'FAST_TICK': .25, 'BURST_READS': 3,
              'READ_FAILURE_HIDE_S': 2,
              'SETTLE_S': 1.2, 'STABLE_READS': 3, 'EARLY_SETTLE_S': .7, 'MIN_GAP_S': 2}
